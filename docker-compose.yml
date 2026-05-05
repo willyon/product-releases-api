@@ -1,0 +1,33 @@
+# 与前后端代码一同提交；在仓库根目录执行：
+#   docker compose -f product-releases-api/docker-compose.yml up -d --build
+# 或在 product-releases-api 目录下执行：
+#   docker compose up -d --build
+services:
+  product-releases-api:
+    build:
+      context: .
+    container_name: product-releases-api
+    env_file:
+      - .env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3090
+      STATS_DB_PATH: ./data/stats.db
+    volumes:
+      - product_releases_api_data:/app/data
+    ports:
+      - "3090:3090"
+    restart: unless-stopped
+
+  product-releases-app:
+    build:
+      context: ../product-releases-app
+    container_name: product-releases-app
+    depends_on:
+      - product-releases-api
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+
+volumes:
+  product_releases_api_data:

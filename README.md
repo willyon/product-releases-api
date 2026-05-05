@@ -64,7 +64,13 @@ npm run db:migrate
 
 ## Docker 部署
 
-仓库根目录提供 `docker-compose.yml`，前后端分容器部署：
+本目录提供 `docker-compose.yml`（与 API 代码一并提交）。在**仓库根目录**执行：
+
+```bash
+docker compose -f product-releases-api/docker-compose.yml up -d --build
+```
+
+或在 `product-releases-api` 目录下：
 
 ```bash
 docker compose up -d --build
