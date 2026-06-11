@@ -1,17 +1,18 @@
+/**
+ * SQLite 单例；路径由 .env DB_PATH 指定（默认 ./data/product-releases.db）。
+ * 首次 getDb() 时建表；Docker 数据卷挂载 /app/data 持久化。
+ */
 const path = require('path')
 const fs = require('fs')
 const Database = require('better-sqlite3')
+const { initSchema } = require('./initSchema')
 
 let dbInstance = null
 
-/**
- * 返回单例 SQLite 连接。
- * @returns {import('better-sqlite3').Database}
- */
 function getDb() {
   if (dbInstance) return dbInstance
 
-  const relative = process.env.STATS_DB_PATH || './data/stats.db'
+  const relative = process.env.DB_PATH || './data/product-releases.db'
   const dbPath = path.isAbsolute(relative) ? relative : path.join(__dirname, '..', '..', relative)
   const dir = path.dirname(dbPath)
   if (!fs.existsSync(dir)) {
@@ -20,13 +21,10 @@ function getDb() {
 
   dbInstance = new Database(dbPath)
   dbInstance.pragma('journal_mode = WAL')
+  initSchema(dbInstance)
   return dbInstance
 }
 
-/**
- * 关闭数据库（优雅退出时调用）。
- * @returns {void}
- */
 function closeDb() {
   if (dbInstance) {
     try {

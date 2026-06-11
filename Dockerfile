@@ -1,3 +1,4 @@
+# product-releases-api 容器镜像；监听 PORT=3090，数据卷持久化 /app/data
 FROM node:22-bookworm-slim
 
 WORKDIR /app
@@ -9,4 +10,4 @@ COPY . .
 
 EXPOSE 3090
 
-CMD ["sh", "-c", "npm run db:migrate && npm run start"]
+CMD ["npm", "run", "start"]

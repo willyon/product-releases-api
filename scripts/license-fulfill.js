@@ -1,0 +1,22 @@
+#!/usr/bin/env node
+/**
+ * 验证期 fulfill：确认到账后发 Pro 激活码。
+ * 用法：node scripts/license-fulfill.js user@example.com "笑笑相册 user@example.com"
+ */
+require('dotenv').config()
+const licenseService = require('../src/services/licenseService')
+
+async function main() {
+  const email = process.argv[2]
+  const paymentNote = process.argv[3] || ''
+  if (!email) {
+    console.error('Usage: node scripts/license-fulfill.js <email> [payment_note]')
+    process.exit(1)
+  }
+  console.log(JSON.stringify(await licenseService.fulfillOrder({ email, paymentNote, amountCents: 12800 }), null, 2))
+}
+
+main().catch((error) => {
+  console.error(error.message || error)
+  process.exit(1)
+})

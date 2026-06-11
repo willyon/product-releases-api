@@ -1,7 +1,6 @@
-# 与前后端代码一同提交；在仓库根目录执行：
-#   docker compose -f product-releases-api/docker-compose.yml up -d --build
-# 或在 product-releases-api 目录下执行：
-#   docker compose up -d --build
+# product-releases 栈：API(3090) + 下载站(8080)
+# 宿主机 nginx：download.* → 8080；license.* → 3090（同一 API 进程）
+# 执行：docker compose up -d --build
 services:
   product-releases-api:
     build:
@@ -12,7 +11,7 @@ services:
     environment:
       HOST: 0.0.0.0
       PORT: 3090
-      STATS_DB_PATH: ./data/stats.db
+      DB_PATH: ./data/product-releases.db
     volumes:
       - product_releases_api_data:/app/data
     ports:
