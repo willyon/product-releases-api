@@ -1,4 +1,4 @@
-/** 163 等 SMTP：试用验证码、Pro 激活码邮件。配置见 .env EMAIL_* */
+/** 163 等 SMTP：试用验证码、永久激活码邮件。配置见 .env EMAIL_* */
 const nodemailer = require('nodemailer')
 const { createApiError } = require('../utils/apiError')
 

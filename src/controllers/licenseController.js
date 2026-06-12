@@ -1,8 +1,8 @@
 /**
  * 许可证 API：解析请求体/查询参数，调用 licenseService。
- * 邮箱格式在此校验；device_id / 激活码等业务规则在 service 层。
  */
 const licenseService = require('../services/licenseService')
+const authService = require('../services/authService')
 const { createApiError } = require('../utils/apiError')
 
 function requireEmail(raw) {
@@ -51,16 +51,35 @@ function generateProCodes(req, res) {
 
 async function fulfillOrder(req, res) {
   const data = await licenseService.fulfillOrder({
-    email: requireEmail(req.body?.email),
-    paymentNote: req.body?.payment_note,
-    amountCents: req.body?.amount_cents
+    email: requireEmail(req.body?.email)
   })
   res.sendResponse({ message: '激活码已发送', data })
 }
 
-function getLicenseStatus(req, res) {
-  const data = licenseService.getLicenseStatus({ email: requireEmail(req.query?.email) })
-  res.sendResponse({ data })
+function getAdminOverview(_req, res) {
+  res.sendResponse({ data: licenseService.getAdminOverview() })
+}
+
+function setRecipientDeviceLimit(req, res) {
+  const data = licenseService.setRecipientDeviceLimit({
+    email: requireEmail(req.body?.email),
+    deviceLimitOverride: req.body?.device_limit_override ?? null
+  })
+  res.sendResponse({ message: '设备上限已更新', data })
+}
+
+function createLicenseAdminSession(req, res, next) {
+  const { username, password } = req.body || {}
+  if (!username || !password) {
+    return next(createApiError('请填写用户名和密码', 400))
+  }
+  if (!authService.isLicenseAdminAuthConfigured()) {
+    return next(createApiError('服务端未配置 LICENSE_ADMIN_USERNAME / LICENSE_ADMIN_PASSWORD / STATS_JWT_SECRET', 503))
+  }
+  if (!authService.validateLicenseAdminCredentials(username, password)) {
+    return next(createApiError('用户名或密码错误', 401))
+  }
+  res.sendResponse({ data: { jwtToken: authService.signLicenseAdminToken() } })
 }
 
 module.exports = {
@@ -69,5 +88,7 @@ module.exports = {
   redeemPro,
   generateProCodes,
   fulfillOrder,
-  getLicenseStatus
+  getAdminOverview,
+  setRecipientDeviceLimit,
+  createLicenseAdminSession
 }

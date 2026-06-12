@@ -2,7 +2,7 @@
  * SQLite 表结构（stats + license 共用 product-releases.db）。
  *
  * 时间字段均为 INTEGER 毫秒时间戳。
- * pro_activation_codes.status: unused | fulfilled | redeemed | revoked
+ * pro_activation_codes.status: unused | fulfilled | redeemed
  */
 function initSchema(db) {
   db.exec(`
@@ -20,11 +20,10 @@ function initSchema(db) {
       id TEXT PRIMARY KEY,
       email_hash TEXT NOT NULL UNIQUE,
       started_at INTEGER NOT NULL,
-      trial_expires_at INTEGER NOT NULL,
-      created_at INTEGER NOT NULL
+      trial_expires_at INTEGER NOT NULL
     );
 
-    -- Pro 码 XXXX-XXXX-XXXX
+    -- 永久激活码 XXXX-XXXX-XXXX
     CREATE TABLE IF NOT EXISTS pro_activation_codes (
       code TEXT PRIMARY KEY,
       email_hash TEXT,
@@ -32,31 +31,16 @@ function initSchema(db) {
       fulfilled_at INTEGER,
       redeemed_at INTEGER,
       license_id TEXT,
-      note TEXT,
       created_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_pro_codes_status ON pro_activation_codes(status);
     CREATE INDEX IF NOT EXISTS idx_pro_codes_email_hash ON pro_activation_codes(email_hash);
-
-    CREATE TABLE IF NOT EXISTS order_fulfillments (
-      id TEXT PRIMARY KEY,
-      email TEXT NOT NULL,
-      email_hash TEXT NOT NULL,
-      activation_code TEXT NOT NULL,
-      amount_cents INTEGER NOT NULL DEFAULT 12800,
-      payment_note TEXT,
-      fulfilled_at INTEGER NOT NULL,
-      redeemed_at INTEGER,
-      created_at INTEGER NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_order_fulfillments_email_hash ON order_fulfillments(email_hash);
 
     CREATE TABLE IF NOT EXISTS license_records (
       license_id TEXT PRIMARY KEY,
       email_hash TEXT NOT NULL,
       edition TEXT NOT NULL,
       device_ids_json TEXT NOT NULL,
-      revoked INTEGER NOT NULL DEFAULT 0,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );
@@ -69,6 +53,15 @@ function initSchema(db) {
       created_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_license_email_codes_email_hash ON license_email_verification_codes(email_hash);
+
+    -- 运维页联系人：试用/发码时写入明文邮箱
+    CREATE TABLE IF NOT EXISTS license_contacts (
+      email TEXT PRIMARY KEY,
+      email_hash TEXT NOT NULL UNIQUE,
+      updated_at INTEGER NOT NULL,
+      device_limit_override INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_license_contacts_email_hash ON license_contacts(email_hash);
   `)
 }
 

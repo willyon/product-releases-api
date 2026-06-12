@@ -1,6 +1,5 @@
 /**
- * 统计页管理员登录：单账号 + JWT（与 xiaoxiao-album 用户体系无关）。
- * 凭据来自 .env：STATS_ADMIN_USERNAME / STATS_ADMIN_PASSWORD / STATS_JWT_SECRET
+ * 后台登录：统计页与许可证运维页各一套账号（.env），JWT 共用 STATS_JWT_SECRET 签发。
  */
 const crypto = require('crypto')
 const jwt = require('jsonwebtoken')
@@ -12,39 +11,45 @@ function timingSafeEqualString(a, b) {
   return crypto.timingSafeEqual(bufA, bufB)
 }
 
-function isAuthConfigured() {
-  const u = process.env.STATS_ADMIN_USERNAME
-  const p = process.env.STATS_ADMIN_PASSWORD
+function isJwtSigningConfigured() {
   const s = process.env.STATS_JWT_SECRET
+  return typeof s === 'string' && s.trim().length >= 16
+}
+
+function isCredentialsConfigured(usernameKey, passwordKey) {
+  const u = process.env[usernameKey]
+  const p = process.env[passwordKey]
   return Boolean(
     typeof u === 'string' &&
       u.trim() &&
       typeof p === 'string' &&
       p.length > 0 &&
-      typeof s === 'string' &&
-      s.trim().length >= 16
+      isJwtSigningConfigured(),
   )
 }
 
-function validateCredentials(username, password) {
-  if (!isAuthConfigured()) return false
-  const okUser = timingSafeEqualString(username?.trim(), process.env.STATS_ADMIN_USERNAME.trim())
-  const okPass = timingSafeEqualString(password ?? '', process.env.STATS_ADMIN_PASSWORD)
-  return okUser && okPass
+function validateCredentials(username, password, usernameKey, passwordKey) {
+  if (!isCredentialsConfigured(usernameKey, passwordKey)) return false
+  return (
+    timingSafeEqualString(username?.trim(), process.env[usernameKey].trim()) &&
+    timingSafeEqualString(password ?? '', process.env[passwordKey])
+  )
 }
 
-function signSessionToken() {
-  const secret = process.env.STATS_JWT_SECRET
-  const expiresIn = process.env.STATS_JWT_EXPIRES_IN || '8h'
-  return jwt.sign(
-    { sub: 'stats-admin', typ: 'product-releases-stats' },
-    secret,
-    { expiresIn }
-  )
+function signToken(sub, typ) {
+  return jwt.sign({ sub, typ }, process.env.STATS_JWT_SECRET, {
+    expiresIn: process.env.STATS_JWT_EXPIRES_IN || '8h'
+  })
 }
 
 module.exports = {
-  isAuthConfigured,
-  validateCredentials,
-  signSessionToken
+  isAuthConfigured: () => isCredentialsConfigured('STATS_ADMIN_USERNAME', 'STATS_ADMIN_PASSWORD'),
+  isLicenseAdminAuthConfigured: () =>
+    isCredentialsConfigured('LICENSE_ADMIN_USERNAME', 'LICENSE_ADMIN_PASSWORD'),
+  validateCredentials: (username, password) =>
+    validateCredentials(username, password, 'STATS_ADMIN_USERNAME', 'STATS_ADMIN_PASSWORD'),
+  validateLicenseAdminCredentials: (username, password) =>
+    validateCredentials(username, password, 'LICENSE_ADMIN_USERNAME', 'LICENSE_ADMIN_PASSWORD'),
+  signSessionToken: () => signToken('stats-admin', 'product-releases-stats'),
+  signLicenseAdminToken: () => signToken('license-admin', 'product-releases-license-admin')
 }

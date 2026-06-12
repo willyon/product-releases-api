@@ -3,7 +3,7 @@
 为 **product-releases-app** 提供：
 
 - 访问统计（页面访问、下载点击）
-- **云端许可证 API**（试用验证码、Pro 激活码、admin fulfill）
+- **云端许可证 API**（试用验证码、永久激活码、admin fulfill）
 
 桌面端通过独立子域名调用许可证接口（方案 B），**不**走本机 `xiaoxiao-album-api`。
 
@@ -24,9 +24,11 @@ npm run dev
 | POST | `/api/license/trial/send-code` | body `{ email }` |
 | POST | `/api/license/trial/activate` | body `{ email, code, device_id }` |
 | POST | `/api/license/pro/redeem` | body `{ email, activation_code, device_id }` |
-| GET | `/api/license/admin/status?email=` | **X-Admin-Key** 查询邮箱授权状态 |
-| POST | `/api/license/admin/codes` | **X-Admin-Key** 批量生成激活码 |
-| POST | `/api/license/admin/fulfill` | **X-Admin-Key** 确认到账发码邮件 |
+| POST | `/api/license/admin/session` | body `{ username, password }` → jwtToken（`LICENSE_ADMIN_*`） |
+| GET | `/api/license/admin/overview` | **Bearer** 运维页一览 |
+| PATCH | `/api/license/admin/recipients/device-limit` | **Bearer** body `{ email, device_limit_override }`（null=默认，0=不限，N=自定义） |
+| POST | `/api/license/admin/codes` | **Bearer** 批量生成激活码 |
+| POST | `/api/license/admin/fulfill` | **Bearer** 确认到账发码邮件 |
 
 桌面端配置（`xiaoxiao-album-app`）：
 
@@ -42,7 +44,7 @@ VITE_LICENSE_API_BASE=https://license.bingbingcloud.com
 ```bash
 node scripts/license-generate-keys.js   # 输出 LICENSE_* 写入 .env
 node scripts/license-generate-codes.js 20
-node scripts/license-fulfill.js user@example.com "笑笑相册 user@example.com"
+node scripts/license-fulfill.js user@example.com
 ```
 
 公钥文件：`config/license-public.pem`（嵌入桌面 App 本地验签，后续 M1 Electron 使用）。
@@ -59,26 +61,21 @@ node scripts/license-fulfill.js user@example.com "笑笑相册 user@example.com"
 
 ## ECS 部署与子域名（license.bingbingcloud.com）
 
-与下载站共用 Docker 栈（`product-releases-api` 容器端口 **3090**）。在宿主机 nginx **新增** server 块（与 `download.bingbingcloud.com` 并列）：
+与下载站共用 Docker 栈（API **3090**、前端 **8080**）。
 
-```nginx
-server {
-    listen 443 ssl;
-    server_name license.bingbingcloud.com;
+**license 子域**同时承担：Electron 调 `/api/license/*`、运维页 **`/license-admin`**（须账号密码登录）。
 
-    # ssl_certificate ...（Certbot 申请）
+完整 nginx 示例见：[`product-releases-app/deploy/nginx-license.bingbingcloud.com.conf.example`](../product-releases-app/deploy/nginx-license.bingbingcloud.com.conf.example)
 
-    location / {
-        proxy_pass http://127.0.0.1:3090;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-```
+要点：
 
-`proxy_pass` 指向同一 `product-releases-api` 容器映射端口即可；路径仍为 `/api/license/...`。
+| 路径 | 反代 |
+|------|------|
+| `/api/` | `127.0.0.1:3090` |
+| `/license-admin`、`/assets/` | `127.0.0.1:8080` |
+| `/` | 302 → `/license-admin` |
+
+建议在 **download.bingbingcloud.com** 增加 `location /license-admin { return 404; }`。
 
 发布：
 
@@ -89,7 +86,7 @@ cd product-releases-api
 docker compose up -d --build
 ```
 
-`.env` 中配置 `EMAIL_*`、`LICENSE_*`、`LICENSE_ADMIN_SECRET`（**勿**打进桌面安装包）。
+`.env` 中配置 `EMAIL_*`、`LICENSE_*`、`LICENSE_ADMIN_USERNAME/PASSWORD`（**勿**打进桌面安装包）。
 
 ## Docker
 

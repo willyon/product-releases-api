@@ -2,9 +2,7 @@
  * 许可证核心业务。
  *
  * 试用：sendTrialCode → activateTrial（写 trial_activations + 签名 license）
- * Pro：码池 unused → fulfill 绑邮箱 → redeemPro（可同码追加第二台设备）
- *
- * 返回给 Electron 的 license = { payload, signature }，本地验签后存 license.json
+ * 永久版：码池 unused → fulfill 绑邮箱 → redeemPro（可同码追加第二台设备）
  */
 const { createApiError } = require('../utils/apiError')
 const { signLicensePayload } = require('../utils/licenseSigning')
@@ -29,7 +27,32 @@ const DEVICE_LIMIT = Number(process.env.LICENSE_DEVICE_LIMIT || 2)
 const SEND_CODE_COOLDOWN_SECONDS = Number(process.env.LICENSE_SEND_CODE_COOLDOWN_SECONDS || 60)
 const VERIFICATION_TTL_MINUTES = Number(process.env.LICENSE_VERIFICATION_TTL_MINUTES || 10)
 
-/** 写入 Ed25519 签名的 payload 结构（字段名与桌面端验签约定一致） */
+/** device_limit_override: null=全局默认，0=不限，正整数=自定义 */
+function effectiveDeviceLimit(override) {
+  if (override === null || override === undefined) return DEVICE_LIMIT
+  if (override === 0) return null
+  return override
+}
+
+function parseDeviceLimitOverride(raw) {
+  if (raw === null || raw === undefined) return null
+  const n = Number(raw)
+  if (!Number.isInteger(n) || n < 0 || n > 9999) {
+    throw createApiError('device_limit_override 须为 null（默认）、0（不限）或 1–9999', 400)
+  }
+  return n
+}
+
+function mergeDeviceIds(existingDeviceIds, deviceId, deviceLimit) {
+  const merged = [...new Set([...(existingDeviceIds || []), deviceId])]
+  if (deviceLimit != null && merged.length > deviceLimit) {
+    const err = createApiError('设备数量已达上限', 403)
+    err.public = { device_limit: deviceLimit }
+    throw err
+  }
+  return merged
+}
+
 function buildTrialPayload({ emailHash, deviceId, trialExpiresAtMs, licenseId }) {
   const issuedAtMs = nowMs()
   return {
@@ -58,24 +81,7 @@ function buildProPayload({ emailHash, deviceIds, licenseId }) {
   }
 }
 
-function assertNotRevoked(licenseId) {
-  const record = licenseModel.getLicenseRecord(licenseId)
-  if (record?.revoked) {
-    throw createApiError('授权已被吊销', 403)
-  }
-}
-
-function mergeDeviceIds(existingDeviceIds, deviceId) {
-  const merged = [...new Set([...(existingDeviceIds || []), deviceId])]
-  if (merged.length > DEVICE_LIMIT) {
-    const err = createApiError('设备数量已达上限', 403)
-    err.public = { device_limit: DEVICE_LIMIT }
-    throw err
-  }
-  return merged
-}
-
-function parseDeviceId(deviceId) {
+function requireDeviceId(deviceId) {
   try {
     return assertDeviceId(deviceId)
   } catch {
@@ -83,8 +89,42 @@ function parseDeviceId(deviceId) {
   }
 }
 
+/** 单邮箱在运维列表中的快照（contact 来自 listAllLicenseContacts 或刚更新的 override） */
+function buildRecipientSnapshot(emailHash, email, contact = {}) {
+  const trial = licenseModel.getTrialActivationByEmailHash(emailHash)
+  const proCode = licenseModel.getFulfilledProCodeForEmail(emailHash)
+  const activeRecord = licenseModel.getActiveLicenseRecordForEmail(emailHash)
+  const deviceLimitOverride = contact.device_limit_override ?? null
+  const deviceLimit = effectiveDeviceLimit(deviceLimitOverride)
+
+  let deviceCount = 0
+  let deviceIds = []
+  if (proCode?.license_id) {
+    const record = licenseModel.getLicenseRecord(proCode.license_id)
+    deviceIds = record?.device_ids || []
+    deviceCount = deviceIds.length
+  }
+
+  return {
+    email,
+    trial_used: Boolean(trial),
+    trial_started_at: trial?.started_at ?? null,
+    trial_expires_at: trial?.trial_expires_at ?? null,
+    fulfilled: Boolean(proCode),
+    can_fulfill: !proCode && Boolean(trial),
+    activation_code: proCode?.code ?? null,
+    code_status: proCode?.status ?? null,
+    active_edition: activeRecord?.edition ?? null,
+    fulfilled_at: proCode?.fulfilled_at ?? null,
+    redeemed_at: proCode?.redeemed_at ?? null,
+    device_count: deviceCount,
+    device_limit: deviceLimit,
+    device_limit_override: deviceLimitOverride,
+    device_ids: deviceIds
+  }
+}
+
 async function sendTrialCode({ email }) {
-  // 仅发邮件验证码，不写 trial_activations；防刷：一邮箱一次试用 + 发码冷却
   const normalizedEmail = normalizeEmail(email)
   const emailHash = hashEmail(normalizedEmail)
 
@@ -98,26 +138,23 @@ async function sendTrialCode({ email }) {
   }
 
   const code = generateNumericCode(6)
-  const expiresAt = nowMs() + VERIFICATION_TTL_MINUTES * 60 * 1000
   licenseModel.insertVerificationCode({
     emailHash,
     codeHash: hashVerificationCode(code),
-    expiresAt
+    expiresAt: nowMs() + VERIFICATION_TTL_MINUTES * 60 * 1000
   })
+
+  licenseModel.upsertLicenseContact({ email: normalizedEmail, emailHash })
 
   await licenseEmailService.sendTrialVerificationEmail({ email: normalizedEmail, code })
 
-  return {
-    email: normalizedEmail,
-    expires_in_seconds: VERIFICATION_TTL_MINUTES * 60
-  }
+  return { expires_in_seconds: VERIFICATION_TTL_MINUTES * 60 }
 }
 
 function activateTrial({ email, code, deviceId }) {
-  // 验证通过后才写库并签发 license；14 天从此时起算
   const normalizedEmail = normalizeEmail(email)
   const emailHash = hashEmail(normalizedEmail)
-  const normalizedDeviceId = parseDeviceId(deviceId)
+  const normalizedDeviceId = requireDeviceId(deviceId)
 
   if (licenseModel.getTrialActivationByEmailHash(emailHash)) {
     throw createApiError('该邮箱已使用过试用', 409)
@@ -144,6 +181,7 @@ function activateTrial({ email, code, deviceId }) {
     }),
   )
 
+  licenseModel.upsertLicenseContact({ email: normalizedEmail, emailHash })
   licenseModel.insertTrialActivation({
     id: licenseId,
     emailHash,
@@ -166,18 +204,16 @@ function activateTrial({ email, code, deviceId }) {
 }
 
 function redeemPro({ email, activationCode, deviceId }) {
-  // status=redeemed 时：同邮箱 + 同码可追加第二台设备（不超过 DEVICE_LIMIT）
   const normalizedEmail = normalizeEmail(email)
   const emailHash = hashEmail(normalizedEmail)
-  const normalizedDeviceId = parseDeviceId(deviceId)
+  const normalizedDeviceId = requireDeviceId(deviceId)
   const code = normalizeActivationCode(activationCode)
+  const contact = licenseModel.getLicenseContactByEmailHash(emailHash)
+  const deviceLimit = effectiveDeviceLimit(contact?.device_limit_override)
 
   const proCode = licenseModel.getProCode(code)
   if (!proCode) {
     throw createApiError('激活码无效', 400)
-  }
-  if (proCode.status === 'revoked') {
-    throw createApiError('授权已被吊销', 403)
   }
   if (proCode.email_hash && proCode.email_hash !== emailHash) {
     throw createApiError('邮箱与激活码不匹配', 400)
@@ -190,12 +226,10 @@ function redeemPro({ email, activationCode, deviceId }) {
   }
 
   if (proCode.status === 'redeemed') {
-    // 第二台及以后：不再改 pro_activation_codes 状态，只更新 license_records.device_ids
     const licenseId = proCode.license_id
     if (!licenseId) {
       throw createApiError('激活码已被使用', 409)
     }
-    assertNotRevoked(licenseId)
     const record = licenseModel.getLicenseRecord(licenseId)
     if (!record || record.email_hash !== emailHash) {
       throw createApiError('激活码已被使用', 409)
@@ -207,7 +241,7 @@ function redeemPro({ email, activationCode, deviceId }) {
         edition: 'pro'
       }
     }
-    const merged = mergeDeviceIds(deviceIds, normalizedDeviceId)
+    const merged = mergeDeviceIds(deviceIds, normalizedDeviceId, deviceLimit)
     const license = signLicensePayload(buildProPayload({ emailHash, deviceIds: merged, licenseId }))
     licenseModel.upsertLicenseRecord({ licenseId, emailHash, edition: 'pro', deviceIds: merged })
     return { license, edition: 'pro' }
@@ -219,15 +253,13 @@ function redeemPro({ email, activationCode, deviceId }) {
 
   if (activeRecord?.license_id) {
     licenseId = activeRecord.license_id
-    assertNotRevoked(licenseId)
     const record = licenseModel.getLicenseRecord(licenseId)
-    deviceIds = mergeDeviceIds(record.device_ids, normalizedDeviceId)
+    deviceIds = mergeDeviceIds(record.device_ids, normalizedDeviceId, deviceLimit)
   }
 
   const license = signLicensePayload(buildProPayload({ emailHash, deviceIds, licenseId }))
 
   licenseModel.markProCodeRedeemed({ code, licenseId })
-  licenseModel.markFulfillmentRedeemed(emailHash, code)
   licenseModel.upsertLicenseRecord({
     licenseId,
     emailHash,
@@ -249,13 +281,16 @@ function generateProCodes({ count }) {
     codes.push(code)
   }
   licenseModel.insertProCodes(codes)
-  return { codes, count: codes.length }
+  return { codes }
 }
 
-async function fulfillOrder({ email, paymentNote, amountCents }) {
-  // 从 unused 码池取码 → 绑 email_hash → 发邮件；order_fulfillments 留明文邮箱便于对账
+async function fulfillOrder({ email, requireTrialCode = true }) {
   const normalizedEmail = normalizeEmail(email)
   const emailHash = hashEmail(normalizedEmail)
+
+  if (requireTrialCode && !licenseModel.getTrialActivationByEmailHash(emailHash)) {
+    throw createApiError('该邮箱尚未激活试用，无法发码', 400)
+  }
 
   const existingCode = licenseModel.getFulfilledProCodeForEmail(emailHash)
   if (existingCode?.status === 'fulfilled') {
@@ -273,20 +308,8 @@ async function fulfillOrder({ email, paymentNote, amountCents }) {
   }
 
   const activationCode = unused.code
-  const fulfillmentId = newLicenseId()
-  licenseModel.markProCodeFulfilled({
-    code: activationCode,
-    emailHash,
-    note: paymentNote || null
-  })
-  licenseModel.insertOrderFulfillment({
-    id: fulfillmentId,
-    email: normalizedEmail,
-    emailHash,
-    activationCode,
-    amountCents: Number(amountCents) || 12800,
-    paymentNote: paymentNote || null
-  })
+  licenseModel.markProCodeFulfilled({ code: activationCode, emailHash })
+  licenseModel.upsertLicenseContact({ email: normalizedEmail, emailHash })
 
   await licenseEmailService.sendProActivationEmail({
     email: normalizedEmail,
@@ -294,30 +317,54 @@ async function fulfillOrder({ email, paymentNote, amountCents }) {
   })
 
   return {
-    fulfillment_id: fulfillmentId,
     email: normalizedEmail,
-    activation_code: activationCode,
-    email_sent: true
+    activation_code: activationCode
   }
 }
 
-function getLicenseStatus({ email }) {
-  const normalizedEmail = normalizeEmail(email)
-  const emailHash = hashEmail(normalizedEmail)
-  const trial = licenseModel.getTrialActivationByEmailHash(emailHash)
-  const fulfillment = licenseModel.getLatestFulfillmentForEmail(emailHash)
-  const proCode = licenseModel.getFulfilledProCodeForEmail(emailHash)
-  const activeRecord = licenseModel.getActiveLicenseRecordForEmail(emailHash)
+function sortAdminRecipients(recipients) {
+  const rank = (row) => {
+    if (!row.fulfilled && row.can_fulfill) return 0
+    if (row.code_status === 'fulfilled') return 1
+    if (!row.fulfilled && !row.can_fulfill) return 2
+    if (row.code_status === 'redeemed') return 3
+    return 4
+  }
+  recipients.sort((a, b) => {
+    const rankDiff = rank(a) - rank(b)
+    if (rankDiff !== 0) return rankDiff
+    return (b.fulfilled_at ?? b.redeemed_at ?? 0) - (a.fulfilled_at ?? a.redeemed_at ?? 0)
+  })
+}
+
+/** 运维页一览：码池 + 全部已知邮箱（无分页，一次返回） */
+function getAdminOverview() {
+  const contacts = licenseModel.listAllLicenseContacts()
+  const recipients = contacts.map((contact) =>
+    buildRecipientSnapshot(contact.email_hash, contact.email, contact),
+  )
+
+  sortAdminRecipients(recipients)
 
   return {
-    email: normalizedEmail,
-    trial_used: Boolean(trial),
-    trial_expires_at: trial?.trial_expires_at || null,
-    fulfilled: Boolean(fulfillment),
-    activation_code_status: proCode?.status || null,
-    active_edition: activeRecord?.edition || null,
-    unused_codes: licenseModel.countUnusedProCodes()
+    unused_codes: licenseModel.countUnusedProCodes(),
+    default_device_limit: DEVICE_LIMIT,
+    recipients
   }
+}
+
+function setRecipientDeviceLimit({ email, deviceLimitOverride }) {
+  const normalizedEmail = normalizeEmail(email)
+  const emailHash = hashEmail(normalizedEmail)
+  const parsed = parseDeviceLimitOverride(deviceLimitOverride)
+
+  licenseModel.setLicenseContactDeviceLimit({
+    email: normalizedEmail,
+    emailHash,
+    deviceLimitOverride: parsed
+  })
+
+  return buildRecipientSnapshot(emailHash, normalizedEmail, { device_limit_override: parsed })
 }
 
 module.exports = {
@@ -326,5 +373,6 @@ module.exports = {
   redeemPro,
   generateProCodes,
   fulfillOrder,
-  getLicenseStatus
+  getAdminOverview,
+  setRecipientDeviceLimit
 }

@@ -6,9 +6,16 @@
  */
 require('dotenv').config()
 
-const crypto = require('crypto')
 const { getDb } = require('../src/db/getDb')
-const { hashEmail, hashVerificationCode, normalizeEmail } = require('../src/utils/licenseCrypto')
+const {
+  hashEmail,
+  hashVerificationCode,
+  normalizeEmail,
+  newLicenseId,
+  nowMs,
+  addDaysMs
+} = require('../src/utils/licenseCrypto')
+const licenseModel = require('../src/models/licenseModel')
 
 const BASE = `http://${process.env.HOST || '127.0.0.1'}:${process.env.PORT || 3091}`
 const PRODUCT_KEY = 'xiaoxiao-photos'
@@ -26,7 +33,7 @@ function fail(name, detail) {
   results.push({ name, ok: false, detail })
 }
 
-async function request(method, path, { body, headers = {}, expectStatus } = {}) {
+async function request(method, path, { body, headers = {} } = {}) {
   const res = await fetch(`${BASE}${path}`, {
     method,
     headers: { 'Content-Type': 'application/json', ...headers },
@@ -57,8 +64,7 @@ async function main() {
   // --- Stats ---
   try {
     const r = await request('POST', '/api/stats/page-view', {
-      body: { productKey: PRODUCT_KEY },
-      expectStatus: 200
+      body: { productKey: PRODUCT_KEY }
     })
     if (r.status === 200 && r.json?.status === 'success') pass('POST /api/stats/page-view', `pageViews=${r.json.data?.pageViews}`)
     else fail('POST /api/stats/page-view', `HTTP ${r.status} ${r.json?.message || ''}`)
@@ -134,62 +140,131 @@ async function main() {
   }
 
   // --- License admin ---
-  const adminKey = String(process.env.LICENSE_ADMIN_SECRET || '').trim()
-  if (!adminKey) {
-    fail('POST /api/license/admin/codes', 'LICENSE_ADMIN_SECRET 未配置')
-    fail('GET /api/license/admin/status', '跳过')
+  const licenseUser = process.env.LICENSE_ADMIN_USERNAME
+  const licensePass = process.env.LICENSE_ADMIN_PASSWORD
+  let licenseJwt = null
+
+  if (!licenseUser || !licensePass || !process.env.STATS_JWT_SECRET) {
+    fail('POST /api/license/admin/session', 'LICENSE_ADMIN_* / STATS_JWT_SECRET 未配置')
+    fail('POST /api/license/admin/codes', '跳过：无 JWT')
     fail('POST /api/license/admin/fulfill', '跳过')
   } else {
     try {
-      const r = await request('POST', '/api/license/admin/codes', {
-        body: { count: 1 },
-        headers: { 'X-Admin-Key': 'invalid-key' }
+      const r = await request('POST', '/api/license/admin/session', {
+        body: { username: licenseUser, password: 'wrong-password-xyz' }
       })
-      if (r.status === 401) pass('POST /api/license/admin/codes (无/错 Key)', '401')
-      else fail('POST /api/license/admin/codes (无/错 Key)', `期望 401，实际 ${r.status}`)
+      if (r.status === 401) pass('POST /api/license/admin/session (错误密码)', '401')
+      else fail('POST /api/license/admin/session (错误密码)', `期望 401，实际 ${r.status}`)
     } catch (e) {
-      fail('POST /api/license/admin/codes (无/错 Key)', e.message)
-    }
-
-    let generatedCode = null
-    try {
-      const r = await request('POST', '/api/license/admin/codes', {
-        body: { count: 1 },
-        headers: { 'X-Admin-Key': adminKey }
-      })
-      if (r.status === 200 && r.json?.data?.codes?.[0]) {
-        generatedCode = r.json.data.codes[0]
-        pass('POST /api/license/admin/codes', `生成码 ${generatedCode}`)
-      } else fail('POST /api/license/admin/codes', `HTTP ${r.status} ${r.json?.message || ''}`)
-    } catch (e) {
-      fail('POST /api/license/admin/codes', e.message)
+      fail('POST /api/license/admin/session (错误密码)', e.message)
     }
 
     try {
-      const r = await request('GET', `/api/license/admin/status?email=${encodeURIComponent(PRO_EMAIL)}`, {
-        headers: { 'X-Admin-Key': adminKey }
+      const r = await request('POST', '/api/license/admin/session', {
+        body: { username: licenseUser, password: licensePass }
       })
-      if (r.status === 200 && r.json?.data?.email) pass('GET /api/license/admin/status', `trial_used=${r.json.data.trial_used}`)
-      else fail('GET /api/license/admin/status', `HTTP ${r.status}`)
+      if (r.status === 200 && r.json?.data?.jwtToken) {
+        licenseJwt = r.json.data.jwtToken
+        pass('POST /api/license/admin/session (正确密码)', '200 + jwtToken')
+      } else fail('POST /api/license/admin/session (正确密码)', `HTTP ${r.status} ${r.json?.message || ''}`)
     } catch (e) {
-      fail('GET /api/license/admin/status', e.message)
+      fail('POST /api/license/admin/session (正确密码)', e.message)
     }
 
-    if (generatedCode) {
+    try {
+      const r = await request('POST', '/api/license/admin/codes', {
+        body: { count: 1 },
+        headers: { Authorization: 'Bearer invalid-token' }
+      })
+      if (r.status === 401) pass('POST /api/license/admin/codes (无/错 Token)', '401')
+      else fail('POST /api/license/admin/codes (无/错 Token)', `期望 401，实际 ${r.status}`)
+    } catch (e) {
+      fail('POST /api/license/admin/codes (无/错 Token)', e.message)
+    }
+
+    if (licenseJwt) {
+      const auth = { Authorization: `Bearer ${licenseJwt}` }
+      let generatedCode = null
       try {
-        const r = await request('POST', '/api/license/admin/fulfill', {
-          body: { email: PRO_EMAIL, payment_note: '本地验证脚本', amount_cents: 12800 },
-          headers: { 'X-Admin-Key': adminKey }
+        const r = await request('POST', '/api/license/admin/codes', {
+          body: { count: 1 },
+          headers: auth
         })
-        if (r.status === 200 && r.json?.data?.activation_code) {
-          pass('POST /api/license/admin/fulfill', `发码 ${r.json.data.activation_code} email_sent=${r.json.data.email_sent}`)
-        } else if (r.status === 502 && String(r.json?.message || '').includes('发送邮件失败')) {
-          fail('POST /api/license/admin/fulfill', `SMTP 失败: ${r.json.message}（接口逻辑可达，需检查 EMAIL_*）`)
+        if (r.status === 200 && r.json?.data?.codes?.[0]) {
+          generatedCode = r.json.data.codes[0]
+          pass('POST /api/license/admin/codes', `生成码 ${generatedCode}`)
+        } else fail('POST /api/license/admin/codes', `HTTP ${r.status} ${r.json?.message || ''}`)
+      } catch (e) {
+        fail('POST /api/license/admin/codes', e.message)
+      }
+
+      if (generatedCode) {
+        try {
+          const proEmailNorm = normalizeEmail(PRO_EMAIL)
+          const proEmailHash = hashEmail(proEmailNorm)
+          licenseModel.insertTrialActivation({
+            id: newLicenseId(),
+            emailHash: proEmailHash,
+            startedAt: nowMs(),
+            trialExpiresAt: addDaysMs(14)
+          })
+
+          const r = await request('POST', '/api/license/admin/fulfill', {
+            body: { email: PRO_EMAIL },
+            headers: auth
+          })
+          if (r.status === 200 && r.json?.data?.activation_code) {
+            pass('POST /api/license/admin/fulfill', `发码 ${r.json.data.activation_code}`)
+          } else if (r.status === 502 && String(r.json?.message || '').includes('发送邮件失败')) {
+            fail('POST /api/license/admin/fulfill', `SMTP 失败: ${r.json.message}（接口逻辑可达，需检查 EMAIL_*）`)
+          } else {
+            fail('POST /api/license/admin/fulfill', `HTTP ${r.status} ${r.json?.message || ''}`)
+          }
+        } catch (e) {
+          fail('POST /api/license/admin/fulfill', e.message)
+        }
+      }
+
+      try {
+        const r = await request('GET', '/api/license/admin/overview', { headers: auth })
+        const recipients = r.json?.data?.recipients
+        const proRow = Array.isArray(recipients)
+          ? recipients.find((row) => row.email === PRO_EMAIL)
+          : null
+        if (
+          r.status === 200 &&
+          typeof r.json?.data?.default_device_limit === 'number' &&
+          proRow &&
+          typeof proRow.device_count === 'number' &&
+          Array.isArray(proRow.device_ids)
+        ) {
+          pass(
+            'GET /api/license/admin/overview',
+            `default_device_limit=${r.json.data.default_device_limit}, ${PRO_EMAIL} 绑定 ${proRow.device_count}/${proRow.device_limit ?? '不限'}`,
+          )
         } else {
-          fail('POST /api/license/admin/fulfill', `HTTP ${r.status} ${r.json?.message || ''}`)
+          fail('GET /api/license/admin/overview', `HTTP ${r.status} 或缺少 device_* 字段`)
+        }
+
+        try {
+          const patch = await request('PATCH', '/api/license/admin/recipients/device-limit', {
+            body: { email: PRO_EMAIL, device_limit_override: 0 },
+            headers: auth
+          })
+          if (
+            patch.status === 200 &&
+            patch.json?.data?.device_limit_override === 0 &&
+            patch.json?.data?.device_limit === null
+          ) {
+            pass('PATCH /api/license/admin/recipients/device-limit', '设为不限')
+          } else {
+            fail('PATCH /api/license/admin/recipients/device-limit', `HTTP ${patch.status}`)
+          }
+        } catch (e) {
+          fail('PATCH /api/license/admin/recipients/device-limit', e.message)
         }
       } catch (e) {
-        fail('POST /api/license/admin/fulfill', e.message)
+        fail('GET /api/license/admin/overview', e.message)
       }
     }
   }
@@ -228,8 +303,8 @@ async function main() {
   }
 
   // --- License pro redeem ---
-  if (!process.env.LICENSE_PRIVATE_KEY_BASE64 || !adminKey) {
-    fail('POST /api/license/pro/redeem', '跳过：缺私钥或 Admin Key')
+  if (!process.env.LICENSE_PRIVATE_KEY_BASE64) {
+    fail('POST /api/license/pro/redeem', '跳过：缺私钥')
   } else {
     // 确保 PRO_EMAIL 有 fulfilled 码（fulfill 可能因 SMTP 失败但码已绑定）
     const emailHash = hashEmail(normalizeEmail(PRO_EMAIL))
@@ -245,7 +320,7 @@ async function main() {
         ).run(emailHash, Date.now(), unused.code)
         pass('POST /api/license/pro/redeem (准备)', `手动绑定码 ${unused.code}`)
       } else {
-        fail('POST /api/license/pro/redeem', '无可用 Pro 码，请先 admin/codes')
+        fail('POST /api/license/pro/redeem', '无可用激活码，请先 admin/codes')
       }
     }
 

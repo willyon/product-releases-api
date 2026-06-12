@@ -3,7 +3,7 @@
  *
  * 同一进程、同一端口同时提供：
  * - /api/stats/*   下载站访问/下载统计 + 统计页管理员登录
- * - /api/license/* 桌面端试用/Pro 激活（license.bingbingcloud.com 反代到此）
+ * - /api/license/* 桌面端试用/永久版激活（license.bingbingcloud.com 反代到此）
  *
  * CORS 分两套：stats 给浏览器；license 额外放行无 Origin（Electron）。
  */
@@ -56,7 +56,7 @@ app.use(
           },
     credentials: true,
     methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Admin-Key']
+    allowedHeaders: ['Content-Type', 'Authorization']
   })
 )
 
@@ -79,8 +79,8 @@ app.use(
       }
       callback(null, false)
     },
-    methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'X-Admin-Key']
+    methods: ['GET', 'POST', 'PATCH', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
   }),
   licenseRoutes
 )
