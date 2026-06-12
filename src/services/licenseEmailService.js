@@ -4,6 +4,17 @@ const { createApiError } = require('../utils/apiError')
 
 const DEVICE_LIMIT = Number(process.env.LICENSE_DEVICE_LIMIT || 2)
 
+function getVerificationTtlMinutes() {
+  const isDev = process.env.NODE_ENV === 'development'
+  return Number(process.env.LICENSE_VERIFICATION_TTL_MINUTES ?? (isDev ? 1440 : 10))
+}
+
+function formatVerificationTtl(minutes) {
+  if (minutes >= 1440 && minutes % 1440 === 0) return `${minutes / 1440} 天`
+  if (minutes >= 60 && minutes % 60 === 0) return `${minutes / 60} 小时`
+  return `${minutes} 分钟`
+}
+
 function assertEmailConfigured() {
   if (!process.env.EMAIL_HOST || !process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
     throw createApiError('发信邮箱未配置（EMAIL_HOST / EMAIL_USER / EMAIL_PASS）', 503)
@@ -45,22 +56,25 @@ async function sendMail({ to, subject, text, html }) {
 
 async function sendTrialVerificationEmail({ email, code }) {
   const trialDays = Number(process.env.LICENSE_TRIAL_DAYS || 14)
-  const ttlMinutes = Number(process.env.LICENSE_VERIFICATION_TTL_MINUTES || 10)
+  const ttlMinutes = getVerificationTtlMinutes()
+  const ttlLabel = formatVerificationTtl(ttlMinutes)
   await sendMail({
     to: email,
-    subject: '笑笑相册试用验证码',
+    subject: `笑笑相册试用验证码（${trialDays} 天）`,
     text: [
-      `您正在激活笑笑相册 ${trialDays} 天试用。`,
+      `您正在开启笑笑相册 ${trialDays} 天全功能试用。`,
       '',
-      `验证码：${code}`,
-      `有效期 ${ttlMinutes} 分钟。若非本人操作，请忽略此邮件。`,
+      `试用验证码（6 位）：${code}`,
+      '',
+      `验证码有效期 ${ttlLabel}。若非本人操作，请忽略此邮件。`,
       '',
       '此邮件由系统自动发送，请勿直接回复。'
     ].join('\n'),
     html: `
-    <p>您正在激活笑笑相册 <strong>${trialDays} 天试用</strong>。</p>
+    <p>您正在开启笑笑相册 <strong>${trialDays} 天全功能试用</strong>。</p>
+    <p>试用验证码（6 位）：</p>
     <p style="font-size:24px;font-weight:700;letter-spacing:0.2em;">${code}</p>
-    <p>验证码有效期 <strong>${ttlMinutes} 分钟</strong>。若非本人操作，请忽略此邮件。</p>
+    <p>验证码有效期 <strong>${ttlLabel}</strong>。若非本人操作，请忽略此邮件。</p>
     <p style="color:#666;font-size:13px;">此邮件由系统自动发送，请勿直接回复。</p>
   `
   })

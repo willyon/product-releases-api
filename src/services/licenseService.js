@@ -24,8 +24,13 @@ const licenseEmailService = require('./licenseEmailService')
 
 const TRIAL_DAYS = Number(process.env.LICENSE_TRIAL_DAYS || 14)
 const DEVICE_LIMIT = Number(process.env.LICENSE_DEVICE_LIMIT || 2)
-const SEND_CODE_COOLDOWN_SECONDS = Number(process.env.LICENSE_SEND_CODE_COOLDOWN_SECONDS || 60)
-const VERIFICATION_TTL_MINUTES = Number(process.env.LICENSE_VERIFICATION_TTL_MINUTES || 10)
+const isDev = process.env.NODE_ENV === 'development'
+const SEND_CODE_COOLDOWN_SECONDS = Number(
+  process.env.LICENSE_SEND_CODE_COOLDOWN_SECONDS ?? (isDev ? 0 : 60)
+)
+const VERIFICATION_TTL_MINUTES = Number(
+  process.env.LICENSE_VERIFICATION_TTL_MINUTES ?? (isDev ? 1440 : 10)
+)
 
 /** device_limit_override: null=全局默认，0=不限，正整数=自定义 */
 function effectiveDeviceLimit(override) {
