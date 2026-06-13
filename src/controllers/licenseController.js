@@ -3,45 +3,48 @@
  */
 const licenseService = require('../services/licenseService')
 const authService = require('../services/authService')
-const { createApiError } = require('../utils/apiError')
-
-function requireEmail(raw) {
-  const email = String(raw || '').trim()
-  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    throw createApiError('邮箱格式无效', 400)
-  }
-  return email
-}
+const { TRIAL_DAYS, DEVICE_LIMIT } = require('../config/licenseConfig')
+const CustomError = require('../errors/customError')
+const { SUCCESS_CODES: SC, ERROR_CODES: EC } = require('../constants/messageCodes')
 
 async function sendTrialCode(req, res) {
-  const data = await licenseService.sendTrialCode({ email: requireEmail(req.body?.email) })
-  res.sendResponse({ message: '试用验证码已发送', data })
+  await licenseService.sendTrialCode({ email: req.body?.email })
+  res.sendResponse({ messageCode: SC.TRIAL_CODE_SENT })
 }
 
 function activateTrial(req, res) {
   const { code, device_id: deviceId } = req.body || {}
   if (!code || !deviceId) {
-    throw createApiError('code 与 device_id 必填', 400)
+    throw new CustomError({ httpStatus: 400, messageCode: EC.MISSING_REQUIRED_FIELDS })
   }
   const data = licenseService.activateTrial({
-    email: requireEmail(req.body?.email),
+    email: req.body?.email,
     code,
     deviceId
   })
-  res.sendResponse({ message: '试用已激活', data })
+  res.sendResponse({ messageCode: SC.TRIAL_ACTIVATED, data })
 }
 
 function redeemPro(req, res) {
   const { activation_code: activationCode, device_id: deviceId } = req.body || {}
   if (!activationCode || !deviceId) {
-    throw createApiError('activation_code 与 device_id 必填', 400)
+    throw new CustomError({ httpStatus: 400, messageCode: EC.MISSING_REQUIRED_FIELDS })
   }
   const data = licenseService.redeemPro({
-    email: requireEmail(req.body?.email),
+    email: req.body?.email,
     activationCode,
     deviceId
   })
-  res.sendResponse({ message: '永久激活成功', data })
+  res.sendResponse({ messageCode: SC.PRO_REDEEMED, data })
+}
+
+function refreshLicense(req, res) {
+  const { license, device_id: deviceId } = req.body || {}
+  if (!license || !deviceId) {
+    throw new CustomError({ httpStatus: 400, messageCode: EC.MISSING_REQUIRED_FIELDS })
+  }
+  const data = licenseService.refreshLicense({ license, deviceId })
+  res.sendResponse({ messageCode: SC.LICENSE_REFRESHED, data })
 }
 
 function generateProCodes(req, res) {
@@ -50,10 +53,12 @@ function generateProCodes(req, res) {
 }
 
 async function fulfillOrder(req, res) {
-  const data = await licenseService.fulfillOrder({
-    email: requireEmail(req.body?.email)
-  })
-  res.sendResponse({ message: '激活码已发送', data })
+  const data = await licenseService.fulfillOrder({ email: req.body?.email })
+  res.sendResponse({ messageCode: SC.PRO_ACTIVATION_CODE_SENT, data })
+}
+
+function getPublicConfig(_req, res) {
+  res.sendResponse({ data: { trialDays: TRIAL_DAYS, deviceLimit: DEVICE_LIMIT } })
 }
 
 function getAdminOverview(_req, res) {
@@ -62,33 +67,38 @@ function getAdminOverview(_req, res) {
 
 function setRecipientDeviceLimit(req, res) {
   const data = licenseService.setRecipientDeviceLimit({
-    email: requireEmail(req.body?.email),
+    email: req.body?.email,
     deviceLimitOverride: req.body?.device_limit_override ?? null
   })
-  res.sendResponse({ message: '设备上限已更新', data })
+  res.sendResponse({ messageCode: SC.DEVICE_LIMIT_UPDATED, data })
 }
 
-function createLicenseAdminSession(req, res, next) {
-  const { username, password } = req.body || {}
-  if (!username || !password) {
-    return next(createApiError('请填写用户名和密码', 400))
-  }
-  if (!authService.isLicenseAdminAuthConfigured()) {
-    return next(createApiError('服务端未配置 LICENSE_ADMIN_USERNAME / LICENSE_ADMIN_PASSWORD / STATS_JWT_SECRET', 503))
-  }
-  if (!authService.validateLicenseAdminCredentials(username, password)) {
-    return next(createApiError('用户名或密码错误', 401))
-  }
-  res.sendResponse({ data: { jwtToken: authService.signLicenseAdminToken() } })
+function revokeProLicense(req, res) {
+  const data = licenseService.revokeProLicense({ email: req.body?.email })
+  res.sendResponse({ messageCode: SC.PRO_REVOKED, data })
+}
+
+function restoreProLicense(req, res) {
+  const data = licenseService.restoreProLicense({ email: req.body?.email })
+  res.sendResponse({ messageCode: SC.PRO_RESTORED, data })
+}
+
+function createLicenseAdminSession(req, res) {
+  const jwtToken = authService.loginLicenseAdmin(req)
+  res.sendResponse({ messageCode: SC.ADMIN_LOGIN_SUCCESS, data: { jwtToken } })
 }
 
 module.exports = {
   sendTrialCode,
   activateTrial,
   redeemPro,
+  refreshLicense,
   generateProCodes,
   fulfillOrder,
+  getPublicConfig,
   getAdminOverview,
   setRecipientDeviceLimit,
+  revokeProLicense,
+  restoreProLicense,
   createLicenseAdminSession
 }

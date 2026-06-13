@@ -7,10 +7,7 @@ const createJwtAuthMiddleware = require('../middlewares/jwtAuthMiddleware')
 const statsController = require('../controllers/statsController')
 
 const router = express.Router()
-const statsAuth = createJwtAuthMiddleware({
-  typ: 'product-releases-stats',
-  unauthMessage: '登录已过期或令牌无效'
-})
+const statsAuth = createJwtAuthMiddleware({ typ: 'product-releases-stats' })
 
 router.post('/page-view', asyncHandler(statsController.recordPageView))
 router.post('/download', asyncHandler(statsController.recordDownload))

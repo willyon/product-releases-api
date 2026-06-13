@@ -2,7 +2,7 @@
  * SQLite 表结构（stats + license 共用 product-releases.db）。
  *
  * 时间字段均为 INTEGER 毫秒时间戳。
- * pro_activation_codes.status: unused | fulfilled | redeemed
+ * pro_activation_codes.status: unused | fulfilled | redeemed | revoked
  */
 function initSchema(db) {
   db.exec(`
@@ -23,7 +23,7 @@ function initSchema(db) {
       trial_expires_at INTEGER NOT NULL
     );
 
-    -- 永久激活码 XXXX-XXXX-XXXX
+    -- Pro 激活码 XXXX-XXXX-XXXX
     CREATE TABLE IF NOT EXISTS pro_activation_codes (
       code TEXT PRIMARY KEY,
       email_hash TEXT,
@@ -42,7 +42,8 @@ function initSchema(db) {
       edition TEXT NOT NULL,
       device_ids_json TEXT NOT NULL,
       created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
+      updated_at INTEGER NOT NULL,
+      revoked_at INTEGER
     );
     CREATE INDEX IF NOT EXISTS idx_license_records_email_hash ON license_records(email_hash);
 

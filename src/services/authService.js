@@ -3,6 +3,8 @@
  */
 const crypto = require('crypto')
 const jwt = require('jsonwebtoken')
+const CustomError = require('../errors/customError')
+const { ERROR_CODES: EC } = require('../constants/messageCodes')
 
 function timingSafeEqualString(a, b) {
   const bufA = Buffer.from(String(a ?? ''), 'utf8')
@@ -42,14 +44,39 @@ function signToken(sub, typ) {
   })
 }
 
+function loginWithCredentials(req, { isConfigured, validate, signTokenFn }) {
+  const { username, password } = req.body || {}
+  if (!username || !password) {
+    throw new CustomError({ httpStatus: 400, messageCode: EC.USERNAME_PASSWORD_REQUIRED })
+  }
+  if (!isConfigured()) {
+    throw new CustomError({ httpStatus: 503, messageCode: EC.ADMIN_AUTH_NOT_CONFIGURED })
+  }
+  if (!validate(username, password)) {
+    throw new CustomError({ httpStatus: 401, messageCode: EC.INVALID_CREDENTIALS })
+  }
+  return signTokenFn()
+}
+
+function loginStatsAdmin(req) {
+  return loginWithCredentials(req, {
+    isConfigured: () => isCredentialsConfigured('STATS_ADMIN_USERNAME', 'STATS_ADMIN_PASSWORD'),
+    validate: (username, password) =>
+      validateCredentials(username, password, 'STATS_ADMIN_USERNAME', 'STATS_ADMIN_PASSWORD'),
+    signTokenFn: () => signToken('stats-admin', 'product-releases-stats')
+  })
+}
+
+function loginLicenseAdmin(req) {
+  return loginWithCredentials(req, {
+    isConfigured: () => isCredentialsConfigured('LICENSE_ADMIN_USERNAME', 'LICENSE_ADMIN_PASSWORD'),
+    validate: (username, password) =>
+      validateCredentials(username, password, 'LICENSE_ADMIN_USERNAME', 'LICENSE_ADMIN_PASSWORD'),
+    signTokenFn: () => signToken('license-admin', 'product-releases-license-admin')
+  })
+}
+
 module.exports = {
-  isAuthConfigured: () => isCredentialsConfigured('STATS_ADMIN_USERNAME', 'STATS_ADMIN_PASSWORD'),
-  isLicenseAdminAuthConfigured: () =>
-    isCredentialsConfigured('LICENSE_ADMIN_USERNAME', 'LICENSE_ADMIN_PASSWORD'),
-  validateCredentials: (username, password) =>
-    validateCredentials(username, password, 'STATS_ADMIN_USERNAME', 'STATS_ADMIN_PASSWORD'),
-  validateLicenseAdminCredentials: (username, password) =>
-    validateCredentials(username, password, 'LICENSE_ADMIN_USERNAME', 'LICENSE_ADMIN_PASSWORD'),
-  signSessionToken: () => signToken('stats-admin', 'product-releases-stats'),
-  signLicenseAdminToken: () => signToken('license-admin', 'product-releases-license-admin')
+  loginStatsAdmin,
+  loginLicenseAdmin
 }

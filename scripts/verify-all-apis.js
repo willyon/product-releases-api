@@ -139,6 +139,16 @@ async function main() {
     }
   }
 
+  // --- License public ---
+  try {
+    const r = await request('GET', '/api/license/config')
+    if (r.status === 200 && Number.isFinite(Number(r.json?.data?.trialDays))) {
+      pass('GET /api/license/config', `trialDays=${r.json.data.trialDays}`)
+    } else fail('GET /api/license/config', `HTTP ${r.status}`)
+  } catch (e) {
+    fail('GET /api/license/config', e.message)
+  }
+
   // --- License admin ---
   const licenseUser = process.env.LICENSE_ADMIN_USERNAME
   const licensePass = process.env.LICENSE_ADMIN_PASSWORD
@@ -215,8 +225,8 @@ async function main() {
           })
           if (r.status === 200 && r.json?.data?.activation_code) {
             pass('POST /api/license/admin/fulfill', `发码 ${r.json.data.activation_code}`)
-          } else if (r.status === 502 && String(r.json?.message || '').includes('发送邮件失败')) {
-            fail('POST /api/license/admin/fulfill', `SMTP 失败: ${r.json.message}（接口逻辑可达，需检查 EMAIL_*）`)
+          } else if (r.status === 502) {
+            fail('POST /api/license/admin/fulfill', `SMTP 失败（HTTP 502，接口逻辑可达，需检查 EMAIL_*）`)
           } else {
             fail('POST /api/license/admin/fulfill', `HTTP ${r.status} ${r.json?.message || ''}`)
           }
@@ -278,7 +288,9 @@ async function main() {
     try {
       const r = await request('POST', '/api/license/trial/send-code', { body: { email: sendCodeEmail } })
       if (r.status === 200) pass('POST /api/license/trial/send-code', r.json?.message || '200')
-      else if (r.status === 502) fail('POST /api/license/trial/send-code', `SMTP: ${r.json?.message}`)
+      else if (r.status === 502 || r.status === 503) {
+        fail('POST /api/license/trial/send-code', `SMTP/邮件配置: HTTP ${r.status}`)
+      }
       else fail('POST /api/license/trial/send-code', `HTTP ${r.status} ${r.json?.message || ''}`)
     } catch (e) {
       fail('POST /api/license/trial/send-code', e.message)

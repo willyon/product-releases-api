@@ -9,7 +9,11 @@
   "scripts": {
     "dev": "NODE_ENV=development node server.js",
     "prod": "NODE_ENV=production node server.js",
-    "start": "NODE_ENV=production node server.js"
+    "start": "NODE_ENV=production node server.js",
+    "license:mock": "node scripts/license-mock-local.js",
+    "license:mock:trial": "node scripts/license-mock-local.js trial",
+    "license:mock:free": "node scripts/license-mock-local.js free",
+    "license:mock:pro": "node scripts/license-mock-local.js pro"
   },
   "dependencies": {
     "better-sqlite3": "^11.2.1",

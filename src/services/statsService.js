@@ -3,7 +3,8 @@
  * 表 counters(product_key, name)；时间戳毫秒，与 license 表一致。
  */
 const { getDb } = require('../db/getDb')
-const { createApiError } = require('../utils/apiError')
+const CustomError = require('../errors/customError')
+const { ERROR_CODES: EC } = require('../constants/messageCodes')
 
 const COUNTER_PAGE = 'page_views'
 const COUNTER_DOWNLOAD = 'download_clicks'
@@ -11,11 +12,11 @@ const COUNTER_DOWNLOAD = 'download_clicks'
 /** 多产品扩展时前端/上报方在 body 或 query 传 productKey */
 function parseProductKey(raw) {
   if (raw === undefined || raw === null || raw === '') {
-    throw createApiError('productKey 必填', 400)
+    throw new CustomError({ httpStatus: 400, messageCode: EC.PRODUCT_KEY_REQUIRED })
   }
   const value = String(raw).trim()
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(value)) {
-    throw createApiError('productKey 格式非法，仅支持字母数字下划线横杠，长度 1-64', 400)
+    throw new CustomError({ httpStatus: 400, messageCode: EC.PRODUCT_KEY_INVALID })
   }
   return value
 }
@@ -35,7 +36,11 @@ function incrementStmt(productKey, key) {
     ).run(pkey, key)
     const retry = stmt.run(now, pkey, key)
     if (retry.changes !== 1) {
-      throw createApiError(`counter not found: ${key}`, 500)
+      throw new CustomError({
+        httpStatus: 500,
+        messageCode: EC.STATS_COUNTER_NOT_FOUND,
+        details: { key }
+      })
     }
   }
   return getCounts(pkey)

@@ -1,22 +1,49 @@
-/** 全局错误中间件：createApiError 抛出的 err.httpStatus → JSON 响应 */
-function errorHandler(err, req, res, _next) {
-  const status = Number.isInteger(err.httpStatus)
-    ? err.httpStatus
-    : Number.isInteger(err.status)
-      ? err.status
-      : 500
-  const safeStatus = status >= 400 && status < 600 ? status : 500
-  const msg = typeof err.message === 'string' && err.message ? err.message : 'Internal Server Error'
+const getI18nMessage = require('../i18n/getI18nMessage')
+const CustomError = require('../errors/customError')
+const { ERROR_CODES } = require('../constants/messageCodes')
 
-  console.error(`[${req.method}] ${req.path}`, msg, err.stack || '')
+function mapToKnownCustomError(err) {
+  if (err && err.type === 'entity.parse.failed') {
+    return new CustomError({
+      message: err?.message,
+      httpStatus: 400,
+      messageCode: ERROR_CODES.INVALID_PARAMETERS,
+      messageType: 'warning',
+      details: { reason: 'invalid_json' }
+    })
+  }
+  return null
+}
+
+function errorHandler(err, req, res, _next) {
+  if (!(err instanceof CustomError)) {
+    const mapped = mapToKnownCustomError(err)
+    err =
+      mapped ||
+      new CustomError({
+        httpStatus: 500,
+        messageCode: ERROR_CODES.SERVER_ERROR,
+        message: err?.message,
+        messageType: 'error'
+      })
+  }
+
+  const lang = req.userLanguage || 'zh'
+  const { httpStatus, messageCode, messageType, public: publicFields, details } = err
+  const safeStatus = Number.isInteger(httpStatus) && httpStatus >= 400 && httpStatus < 600 ? httpStatus : 500
+  const safeCode = messageCode || ERROR_CODES.SERVER_ERROR
+  const messageText = getI18nMessage(safeCode, lang, { ...details, ...publicFields })
+
+  console.error(`[${req.method}] ${req.path}`, `[${safeCode}]`, err.message || messageText, err.stack || '')
 
   const payload = {
     status: 'error',
-    messageType: 'error',
-    message: safeStatus === 500 ? '服务器内部错误' : msg
+    messageType: messageType || 'error',
+    messageCode: safeCode,
+    message: messageText
   }
-  if (err.public && typeof err.public === 'object') {
-    payload.data = err.public
+  if (publicFields && typeof publicFields === 'object') {
+    payload.data = publicFields
   }
 
   res.status(safeStatus).json(payload)

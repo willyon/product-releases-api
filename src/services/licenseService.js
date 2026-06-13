@@ -2,10 +2,14 @@
  * 许可证核心业务。
  *
  * 试用：sendTrialCode → activateTrial（写 trial_activations + 签名 license）
- * 永久版：码池 unused → fulfill 绑邮箱 → redeemPro（可同码追加第二台设备）
+ * Pro：码池 unused → fulfill 绑邮箱 → redeemPro（可同码追加第二台设备）
  */
-const { createApiError } = require('../utils/apiError')
-const { signLicensePayload } = require('../utils/licenseSigning')
+const CustomError = require('../errors/customError')
+const { ERROR_CODES: EC } = require('../constants/messageCodes')
+const { buildTrialPayload, buildProPayload, signLicensePayload } = require('../utils/licenseSigning')
+const { verifyLicenseFile } = require('../utils/licenseVerify')
+const licenseModel = require('../models/licenseModel')
+const licenseEmailService = require('./licenseEmailService')
 const {
   normalizeEmail,
   hashEmail,
@@ -16,21 +20,31 @@ const {
   normalizeActivationCode,
   newLicenseId,
   nowMs,
-  addDaysMs,
-  msToIso
+  addDaysMs
 } = require('../utils/licenseCrypto')
-const licenseModel = require('../models/licenseModel')
-const licenseEmailService = require('./licenseEmailService')
+const {
+  TRIAL_DAYS,
+  DEVICE_LIMIT,
+  SEND_CODE_COOLDOWN_SECONDS,
+  VERIFICATION_TTL_MINUTES
+} = require('../config/licenseConfig')
 
-const TRIAL_DAYS = Number(process.env.LICENSE_TRIAL_DAYS || 14)
-const DEVICE_LIMIT = Number(process.env.LICENSE_DEVICE_LIMIT || 2)
-const isDev = process.env.NODE_ENV === 'development'
-const SEND_CODE_COOLDOWN_SECONDS = Number(
-  process.env.LICENSE_SEND_CODE_COOLDOWN_SECONDS ?? (isDev ? 0 : 60)
-)
-const VERIFICATION_TTL_MINUTES = Number(
-  process.env.LICENSE_VERIFICATION_TTL_MINUTES ?? (isDev ? 1440 : 10)
-)
+function licenseError(code, httpStatus, publicFields) {
+  return new CustomError({
+    httpStatus,
+    messageCode: code,
+    messageType: 'error',
+    public: publicFields
+  })
+}
+
+function requireLicenseEmail(raw) {
+  const email = normalizeEmail(raw)
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw licenseError(EC.INVALID_EMAIL, 400, { field: 'email' })
+  }
+  return { email, emailHash: hashEmail(email) }
+}
 
 /** device_limit_override: null=全局默认，0=不限，正整数=自定义 */
 function effectiveDeviceLimit(override) {
@@ -43,7 +57,7 @@ function parseDeviceLimitOverride(raw) {
   if (raw === null || raw === undefined) return null
   const n = Number(raw)
   if (!Number.isInteger(n) || n < 0 || n > 9999) {
-    throw createApiError('device_limit_override 须为 null（默认）、0（不限）或 1–9999', 400)
+    throw licenseError(EC.INVALID_DEVICE_LIMIT_OVERRIDE, 400)
   }
   return n
 }
@@ -51,64 +65,39 @@ function parseDeviceLimitOverride(raw) {
 function mergeDeviceIds(existingDeviceIds, deviceId, deviceLimit) {
   const merged = [...new Set([...(existingDeviceIds || []), deviceId])]
   if (deviceLimit != null && merged.length > deviceLimit) {
-    const err = createApiError('设备数量已达上限', 403)
-    err.public = { device_limit: deviceLimit }
-    throw err
+    throw licenseError(EC.DEVICE_LIMIT_REACHED, 403, {
+      field: 'email',
+      device_limit: deviceLimit
+    })
   }
   return merged
-}
-
-function buildTrialPayload({ emailHash, deviceId, trialExpiresAtMs, licenseId }) {
-  const issuedAtMs = nowMs()
-  return {
-    v: 1,
-    edition: 'trial',
-    email_hash: emailHash,
-    trial_expires_at: msToIso(trialExpiresAtMs),
-    pro_activated_at: null,
-    device_ids: [deviceId],
-    issued_at: msToIso(issuedAtMs),
-    license_id: licenseId
-  }
-}
-
-function buildProPayload({ emailHash, deviceIds, licenseId }) {
-  const activatedAtMs = nowMs()
-  return {
-    v: 1,
-    edition: 'pro',
-    email_hash: emailHash,
-    trial_expires_at: null,
-    pro_activated_at: msToIso(activatedAtMs),
-    device_ids: deviceIds,
-    issued_at: msToIso(activatedAtMs),
-    license_id: licenseId
-  }
 }
 
 function requireDeviceId(deviceId) {
   try {
     return assertDeviceId(deviceId)
   } catch {
-    throw createApiError('device_id 无效', 400)
+    throw licenseError(EC.INVALID_DEVICE_ID, 400)
   }
 }
 
 /** 单邮箱在运维列表中的快照（contact 来自 listAllLicenseContacts 或刚更新的 override） */
 function buildRecipientSnapshot(emailHash, email, contact = {}) {
   const trial = licenseModel.getTrialActivationByEmailHash(emailHash)
-  const proCode = licenseModel.getFulfilledProCodeForEmail(emailHash)
+  const proCode = licenseModel.getLatestProCodeForEmail(emailHash)
   const activeRecord = licenseModel.getActiveLicenseRecordForEmail(emailHash)
+  const proRecord = proCode?.license_id ? licenseModel.getLicenseRecord(proCode.license_id) : null
   const deviceLimitOverride = contact.device_limit_override ?? null
   const deviceLimit = effectiveDeviceLimit(deviceLimitOverride)
 
   let deviceCount = 0
   let deviceIds = []
-  if (proCode?.license_id) {
-    const record = licenseModel.getLicenseRecord(proCode.license_id)
-    deviceIds = record?.device_ids || []
+  if (proRecord) {
+    deviceIds = proRecord.device_ids || []
     deviceCount = deviceIds.length
   }
+
+  const proRevoked = Boolean(proRecord?.revoked_at)
 
   return {
     email,
@@ -122,6 +111,11 @@ function buildRecipientSnapshot(emailHash, email, contact = {}) {
     active_edition: activeRecord?.edition ?? null,
     fulfilled_at: proCode?.fulfilled_at ?? null,
     redeemed_at: proCode?.redeemed_at ?? null,
+    pro_revoked_at: proRecord?.revoked_at ?? null,
+    can_revoke_pro:
+      proCode?.status === 'redeemed' && proRecord?.edition === 'pro' && !proRevoked,
+    can_restore_pro:
+      proCode?.status === 'revoked' && proRecord?.edition === 'pro' && proRevoked,
     device_count: deviceCount,
     device_limit: deviceLimit,
     device_limit_override: deviceLimitOverride,
@@ -130,16 +124,15 @@ function buildRecipientSnapshot(emailHash, email, contact = {}) {
 }
 
 async function sendTrialCode({ email }) {
-  const normalizedEmail = normalizeEmail(email)
-  const emailHash = hashEmail(normalizedEmail)
+  const { email: normalizedEmail, emailHash } = requireLicenseEmail(email)
 
   if (licenseModel.getTrialActivationByEmailHash(emailHash)) {
-    throw createApiError('该邮箱已使用过试用', 409)
+    throw licenseError(EC.TRIAL_EMAIL_ALREADY_USED, 409, { field: 'email' })
   }
 
   const sinceMs = nowMs() - SEND_CODE_COOLDOWN_SECONDS * 1000
   if (licenseModel.getVerificationCodeCreatedWithin(emailHash, sinceMs)) {
-    throw createApiError('请求过于频繁，请稍后再试', 429)
+    throw licenseError(EC.SEND_CODE_TOO_FREQUENT, 429)
   }
 
   const code = generateNumericCode(6)
@@ -152,26 +145,23 @@ async function sendTrialCode({ email }) {
   licenseModel.upsertLicenseContact({ email: normalizedEmail, emailHash })
 
   await licenseEmailService.sendTrialVerificationEmail({ email: normalizedEmail, code })
-
-  return { expires_in_seconds: VERIFICATION_TTL_MINUTES * 60 }
 }
 
 function activateTrial({ email, code, deviceId }) {
-  const normalizedEmail = normalizeEmail(email)
-  const emailHash = hashEmail(normalizedEmail)
+  const { email: normalizedEmail, emailHash } = requireLicenseEmail(email)
   const normalizedDeviceId = requireDeviceId(deviceId)
 
   if (licenseModel.getTrialActivationByEmailHash(emailHash)) {
-    throw createApiError('该邮箱已使用过试用', 409)
+    throw licenseError(EC.TRIAL_EMAIL_ALREADY_USED, 409, { field: 'email' })
   }
 
   const stored = licenseModel.getLatestVerificationCode(emailHash)
   if (!stored || stored.expires_at < nowMs()) {
-    throw createApiError('验证码无效或已过期', 400)
+    throw licenseError(EC.TRIAL_CODE_INVALID, 400, { field: 'code' })
   }
 
   if (stored.code_hash !== hashVerificationCode(String(code || '').trim())) {
-    throw createApiError('验证码无效或已过期', 400)
+    throw licenseError(EC.TRIAL_CODE_INVALID, 400, { field: 'code' })
   }
 
   const startedAtMs = nowMs()
@@ -180,7 +170,7 @@ function activateTrial({ email, code, deviceId }) {
   const license = signLicensePayload(
     buildTrialPayload({
       emailHash,
-      deviceId: normalizedDeviceId,
+      deviceIds: [normalizedDeviceId],
       trialExpiresAtMs,
       licenseId
     }),
@@ -209,8 +199,7 @@ function activateTrial({ email, code, deviceId }) {
 }
 
 function redeemPro({ email, activationCode, deviceId }) {
-  const normalizedEmail = normalizeEmail(email)
-  const emailHash = hashEmail(normalizedEmail)
+  const { email: normalizedEmail, emailHash } = requireLicenseEmail(email)
   const normalizedDeviceId = requireDeviceId(deviceId)
   const code = normalizeActivationCode(activationCode)
   const contact = licenseModel.getLicenseContactByEmailHash(emailHash)
@@ -218,26 +207,29 @@ function redeemPro({ email, activationCode, deviceId }) {
 
   const proCode = licenseModel.getProCode(code)
   if (!proCode) {
-    throw createApiError('激活码无效', 400)
+    throw licenseError(EC.ACTIVATION_CODE_INVALID, 400, { field: 'code' })
   }
   if (proCode.email_hash && proCode.email_hash !== emailHash) {
-    throw createApiError('邮箱与激活码不匹配', 400)
+    throw licenseError(EC.ACTIVATION_CODE_EMAIL_MISMATCH, 400, { field: 'code' })
   }
   if (proCode.status !== 'fulfilled' && proCode.status !== 'redeemed') {
-    throw createApiError('激活码无效', 400)
+    throw licenseError(EC.ACTIVATION_CODE_INVALID, 400, { field: 'code' })
   }
   if (proCode.status === 'fulfilled' && !proCode.email_hash) {
-    throw createApiError('激活码无效', 400)
+    throw licenseError(EC.ACTIVATION_CODE_INVALID, 400, { field: 'code' })
   }
 
   if (proCode.status === 'redeemed') {
     const licenseId = proCode.license_id
     if (!licenseId) {
-      throw createApiError('激活码已被使用', 409)
+      throw licenseError(EC.ACTIVATION_CODE_USED, 409, { field: 'code' })
     }
     const record = licenseModel.getLicenseRecord(licenseId)
     if (!record || record.email_hash !== emailHash) {
-      throw createApiError('激活码已被使用', 409)
+      throw licenseError(EC.ACTIVATION_CODE_USED, 409, { field: 'code' })
+    }
+    if (record.revoked_at) {
+      throw licenseError(EC.LICENSE_REVOKED, 403, { field: 'code' })
     }
     const deviceIds = record.device_ids
     if (deviceIds.includes(normalizedDeviceId)) {
@@ -290,26 +282,23 @@ function generateProCodes({ count }) {
 }
 
 async function fulfillOrder({ email, requireTrialCode = true }) {
-  const normalizedEmail = normalizeEmail(email)
-  const emailHash = hashEmail(normalizedEmail)
+  const { email: normalizedEmail, emailHash } = requireLicenseEmail(email)
 
   if (requireTrialCode && !licenseModel.getTrialActivationByEmailHash(emailHash)) {
-    throw createApiError('该邮箱尚未激活试用，无法发码', 400)
+    throw licenseError(EC.TRIAL_REQUIRED_FOR_FULFILL, 400)
   }
 
   const existingCode = licenseModel.getFulfilledProCodeForEmail(emailHash)
   if (existingCode?.status === 'fulfilled') {
-    const err = createApiError('该邮箱已发过激活码', 409)
-    err.public = {
+    throw licenseError(EC.ACTIVATION_CODE_ALREADY_SENT, 409, {
       activation_code: existingCode.code,
       fulfilled_at: existingCode.fulfilled_at
-    }
-    throw err
+    })
   }
 
   const unused = licenseModel.takeUnusedProCode()
   if (!unused) {
-    throw createApiError('激活码池已用尽，请先生成新码', 409)
+    throw licenseError(EC.ACTIVATION_CODE_POOL_EMPTY, 409)
   }
 
   const activationCode = unused.code
@@ -327,21 +316,6 @@ async function fulfillOrder({ email, requireTrialCode = true }) {
   }
 }
 
-function sortAdminRecipients(recipients) {
-  const rank = (row) => {
-    if (!row.fulfilled && row.can_fulfill) return 0
-    if (row.code_status === 'fulfilled') return 1
-    if (!row.fulfilled && !row.can_fulfill) return 2
-    if (row.code_status === 'redeemed') return 3
-    return 4
-  }
-  recipients.sort((a, b) => {
-    const rankDiff = rank(a) - rank(b)
-    if (rankDiff !== 0) return rankDiff
-    return (b.fulfilled_at ?? b.redeemed_at ?? 0) - (a.fulfilled_at ?? a.redeemed_at ?? 0)
-  })
-}
-
 /** 运维页一览：码池 + 全部已知邮箱（无分页，一次返回） */
 function getAdminOverview() {
   const contacts = licenseModel.listAllLicenseContacts()
@@ -349,7 +323,18 @@ function getAdminOverview() {
     buildRecipientSnapshot(contact.email_hash, contact.email, contact),
   )
 
-  sortAdminRecipients(recipients)
+  recipients.sort((a, b) => {
+    const rank = (row) => {
+      if (!row.fulfilled && row.can_fulfill) return 0
+      if (row.code_status === 'fulfilled') return 1
+      if (!row.fulfilled && !row.can_fulfill) return 2
+      if (row.code_status === 'redeemed') return 3
+      return 4
+    }
+    const rankDiff = rank(a) - rank(b)
+    if (rankDiff !== 0) return rankDiff
+    return (b.fulfilled_at ?? b.redeemed_at ?? 0) - (a.fulfilled_at ?? a.redeemed_at ?? 0)
+  })
 
   return {
     unused_codes: licenseModel.countUnusedProCodes(),
@@ -359,8 +344,7 @@ function getAdminOverview() {
 }
 
 function setRecipientDeviceLimit({ email, deviceLimitOverride }) {
-  const normalizedEmail = normalizeEmail(email)
-  const emailHash = hashEmail(normalizedEmail)
+  const { email: normalizedEmail, emailHash } = requireLicenseEmail(email)
   const parsed = parseDeviceLimitOverride(deviceLimitOverride)
 
   licenseModel.setLicenseContactDeviceLimit({
@@ -372,6 +356,124 @@ function setRecipientDeviceLimit({ email, deviceLimitOverride }) {
   return buildRecipientSnapshot(emailHash, normalizedEmail, { device_limit_override: parsed })
 }
 
+function refreshLicense({ license, deviceId }) {
+  const normalizedDeviceId = requireDeviceId(deviceId)
+  if (!license?.payload || !license?.signature) {
+    throw licenseError(EC.INVALID_LICENSE, 400)
+  }
+  if (!verifyLicenseFile(license)) {
+    throw licenseError(EC.INVALID_LICENSE, 400)
+  }
+
+  const payload = license.payload
+  const licenseId = payload.license_id
+  if (!licenseId) {
+    throw licenseError(EC.INVALID_LICENSE, 400)
+  }
+
+  const record = licenseModel.getLicenseRecord(licenseId)
+  if (!record) {
+    throw licenseError(EC.LICENSE_NOT_FOUND, 404)
+  }
+  if (record.revoked_at) {
+    throw licenseError(EC.LICENSE_REVOKED, 403)
+  }
+  if (record.email_hash !== payload.email_hash) {
+    throw licenseError(EC.INVALID_LICENSE, 400)
+  }
+  if (!record.device_ids.includes(normalizedDeviceId)) {
+    throw licenseError(EC.INVALID_DEVICE_ID, 403)
+  }
+
+  if (record.edition === 'pro' && payload.edition === 'pro') {
+    return {
+      license: signLicensePayload(
+        buildProPayload({
+          emailHash: record.email_hash,
+          deviceIds: record.device_ids,
+          licenseId
+        }),
+      ),
+      edition: 'pro'
+    }
+  }
+
+  if (record.edition === 'trial' && payload.edition === 'trial') {
+    const trial = licenseModel.getTrialActivationByEmailHash(record.email_hash)
+    if (!trial || trial.id !== licenseId) {
+      throw licenseError(EC.INVALID_LICENSE, 400)
+    }
+    if (nowMs() > trial.trial_expires_at) {
+      throw licenseError(EC.TRIAL_CODE_INVALID, 403)
+    }
+    return {
+      license: signLicensePayload(
+        buildTrialPayload({
+          emailHash: record.email_hash,
+          deviceIds: record.device_ids,
+          trialExpiresAtMs: trial.trial_expires_at,
+          licenseId
+        }),
+      ),
+      edition: 'trial',
+      trial_expires_at: trial.trial_expires_at
+    }
+  }
+
+  throw licenseError(EC.INVALID_LICENSE, 400)
+}
+
+function mutateProLicense({ email, findCode, notAllowedCode, assertRecord, apply }) {
+  const { email: normalizedEmail, emailHash } = requireLicenseEmail(email)
+  const proCode = findCode(emailHash)
+  if (!proCode?.license_id) {
+    throw licenseError(notAllowedCode, 400, { field: 'email' })
+  }
+
+  const record = licenseModel.getLicenseRecord(proCode.license_id)
+  if (!record || record.edition !== 'pro') {
+    throw licenseError(notAllowedCode, 400, { field: 'email' })
+  }
+  assertRecord(record)
+
+  apply(proCode, record)
+  return buildRecipientSnapshot(emailHash, normalizedEmail)
+}
+
+function revokeProLicense({ email }) {
+  return mutateProLicense({
+    email,
+    findCode: licenseModel.getRedeemedProCodeForEmail,
+    notAllowedCode: EC.PRO_NOT_REVOKABLE,
+    assertRecord: (record) => {
+      if (record.revoked_at) {
+        throw licenseError(EC.PRO_ALREADY_REVOKED, 409, { field: 'email' })
+      }
+    },
+    apply: (proCode) => {
+      licenseModel.revokeLicenseRecord(proCode.license_id)
+      licenseModel.markProCodeRevoked({ code: proCode.code })
+    }
+  })
+}
+
+function restoreProLicense({ email }) {
+  return mutateProLicense({
+    email,
+    findCode: licenseModel.getRevokedProCodeForEmail,
+    notAllowedCode: EC.PRO_NOT_RESTORABLE,
+    assertRecord: (record) => {
+      if (!record.revoked_at) {
+        throw licenseError(EC.PRO_NOT_REVOKED, 409, { field: 'email' })
+      }
+    },
+    apply: (proCode) => {
+      licenseModel.restoreLicenseRecord(proCode.license_id)
+      licenseModel.markProCodeRestored({ code: proCode.code })
+    }
+  })
+}
+
 module.exports = {
   sendTrialCode,
   activateTrial,
@@ -379,5 +481,8 @@ module.exports = {
   generateProCodes,
   fulfillOrder,
   getAdminOverview,
-  setRecipientDeviceLimit
+  setRecipientDeviceLimit,
+  refreshLicense,
+  revokeProLicense,
+  restoreProLicense
 }

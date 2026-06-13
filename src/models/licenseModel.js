@@ -20,7 +20,7 @@ function insertTrialActivation({ id, emailHash, startedAt, trialExpiresAt }) {
   ).run(id, emailHash, startedAt, trialExpiresAt)
 }
 
-// --- 试用邮件验证码（6 位，非永久激活码）---
+// --- 试用邮件验证码（6 位，非 Pro 激活码）---
 
 function deleteVerificationCodesForEmail(emailHash) {
   getDb().prepare('DELETE FROM license_email_verification_codes WHERE email_hash = ?').run(emailHash)
@@ -80,7 +80,7 @@ function upsertLicenseRecord({ licenseId, emailHash, edition, deviceIds }) {
 function getLicenseRecord(licenseId) {
   const row = getDb()
     .prepare(
-      `SELECT license_id, email_hash, edition, device_ids_json, created_at, updated_at
+      `SELECT license_id, email_hash, edition, device_ids_json, created_at, updated_at, revoked_at
        FROM license_records WHERE license_id = ?`,
     )
     .get(licenseId)
@@ -145,16 +145,73 @@ function markProCodeRedeemed({ code, licenseId }) {
   ).run(nowMs(), licenseId, code)
 }
 
-function getFulfilledProCodeForEmail(emailHash) {
+function markProCodeRevoked({ code }) {
+  getDb().prepare(
+    `UPDATE pro_activation_codes
+     SET status = 'revoked'
+     WHERE code = ? AND status = 'redeemed'`,
+  ).run(code)
+}
+
+function markProCodeRestored({ code }) {
+  getDb().prepare(
+    `UPDATE pro_activation_codes
+     SET status = 'redeemed'
+     WHERE code = ? AND status = 'revoked'`,
+  ).run(code)
+}
+
+function revokeLicenseRecord(licenseId) {
+  getDb().prepare(
+    `UPDATE license_records
+     SET revoked_at = ?, updated_at = ?
+     WHERE license_id = ? AND edition = 'pro' AND revoked_at IS NULL`,
+  ).run(nowMs(), nowMs(), licenseId)
+}
+
+function restoreLicenseRecord(licenseId) {
+  getDb().prepare(
+    `UPDATE license_records
+     SET revoked_at = NULL, updated_at = ?
+     WHERE license_id = ? AND edition = 'pro' AND revoked_at IS NOT NULL`,
+  ).run(nowMs(), licenseId)
+}
+
+const PRO_CODE_COLUMNS =
+  'code, email_hash, status, fulfilled_at, redeemed_at, license_id'
+
+function getProCodeForEmail(emailHash, { statusSql, orderBy }) {
   return getDb()
     .prepare(
-      `SELECT code, email_hash, status, fulfilled_at, redeemed_at, license_id
+      `SELECT ${PRO_CODE_COLUMNS}
        FROM pro_activation_codes
-       WHERE email_hash = ? AND status IN ('fulfilled', 'redeemed')
-       ORDER BY fulfilled_at DESC
+       WHERE email_hash = ? AND ${statusSql}
+       ORDER BY ${orderBy}
        LIMIT 1`,
     )
     .get(emailHash)
+}
+
+function getRedeemedProCodeForEmail(emailHash) {
+  return getProCodeForEmail(emailHash, { statusSql: "status = 'redeemed'", orderBy: 'redeemed_at DESC' })
+}
+
+function getRevokedProCodeForEmail(emailHash) {
+  return getProCodeForEmail(emailHash, { statusSql: "status = 'revoked'", orderBy: 'redeemed_at DESC' })
+}
+
+function getLatestProCodeForEmail(emailHash) {
+  return getProCodeForEmail(emailHash, {
+    statusSql: "status IN ('fulfilled', 'redeemed', 'revoked')",
+    orderBy: 'fulfilled_at DESC'
+  })
+}
+
+function getFulfilledProCodeForEmail(emailHash) {
+  return getProCodeForEmail(emailHash, {
+    statusSql: "status IN ('fulfilled', 'redeemed')",
+    orderBy: 'fulfilled_at DESC'
+  })
 }
 
 function getActiveLicenseRecordForEmail(emailHash) {
@@ -225,6 +282,13 @@ module.exports = {
   takeUnusedProCode,
   markProCodeFulfilled,
   markProCodeRedeemed,
+  markProCodeRevoked,
+  markProCodeRestored,
+  revokeLicenseRecord,
+  restoreLicenseRecord,
+  getRedeemedProCodeForEmail,
+  getRevokedProCodeForEmail,
+  getLatestProCodeForEmail,
   getFulfilledProCodeForEmail,
   getActiveLicenseRecordForEmail,
   upsertLicenseContact,

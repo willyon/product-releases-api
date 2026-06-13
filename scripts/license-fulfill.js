@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 验证期 fulfill：确认到账后发永久激活码。
+ * 验证期 fulfill：确认到账后发 Pro 激活码。
  * 用法：node scripts/license-fulfill.js user@example.com
  */
 require('dotenv').config()

@@ -1,10 +1,16 @@
-/** 统一成功响应：res.sendResponse({ data, message, httpStatus }) */
+const getI18nMessage = require('../i18n/getI18nMessage')
+const { SUCCESS_CODES } = require('../constants/messageCodes')
+
 const responseHandler = (req, res, next) => {
-  res.sendResponse = ({ data = null, httpStatus = 200, message = 'ok' } = {}) => {
+  req.userLanguage = req.get('X-Accept-Language') || 'zh'
+
+  res.sendResponse = ({ messageCode = SUCCESS_CODES.REQUEST_COMPLETED, data = null, httpStatus = 200, details } = {}) => {
+    const message = getI18nMessage(messageCode, req.userLanguage, details)
     const safeStatus = Number.isInteger(httpStatus) ? httpStatus : 200
     const payload = {
       status: 'success',
       messageType: 'success',
+      messageCode,
       message
     }
     if (data !== null && data !== undefined) {
@@ -12,6 +18,7 @@ const responseHandler = (req, res, next) => {
     }
     res.status(safeStatus).json(payload)
   }
+
   next()
 }
 

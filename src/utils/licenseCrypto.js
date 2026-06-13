@@ -54,7 +54,7 @@ function generateActivationCodeSegment(length = 4) {
   return segment
 }
 
-/** 永久激活码格式：XXXX-XXXX-XXXX */
+/** Pro 激活码格式：XXXX-XXXX-XXXX */
 function generateActivationCode() {
   return `${generateActivationCodeSegment()}-${generateActivationCodeSegment()}-${generateActivationCodeSegment()}`
 }

@@ -3,7 +3,7 @@
 为 **product-releases-app** 提供：
 
 - 访问统计（页面访问、下载点击）
-- **云端许可证 API**（试用验证码、永久激活码、admin fulfill）
+- **云端许可证 API**（试用验证码、Pro 激活码、admin fulfill）
 
 桌面端通过独立子域名调用许可证接口（方案 B），**不**走本机 `xiaoxiao-album-api`。
 
@@ -21,6 +21,7 @@ npm run dev
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
+| GET | `/api/license/config` | 公开；`{ trialDays, deviceLimit }`（来自 `LICENSE_TRIAL_DAYS` 等 env） |
 | POST | `/api/license/trial/send-code` | body `{ email }` |
 | POST | `/api/license/trial/activate` | body `{ email, code, device_id }` |
 | POST | `/api/license/pro/redeem` | body `{ email, activation_code, device_id }` |
