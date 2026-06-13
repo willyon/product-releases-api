@@ -1,89 +1,10 @@
 /**
  * 许可证 SQLite 访问层（见 initSchema.js 表说明）。
- * 时间字段均为毫秒时间戳（INTEGER）。
  */
 const { getDb } = require('../db/getDb')
 const { nowMs } = require('../utils/licenseCrypto')
 
-// --- 试用 ---
-
-function getTrialActivationByEmailHash(emailHash) {
-  return getDb()
-    .prepare('SELECT id, email_hash, started_at, trial_expires_at FROM trial_activations WHERE email_hash = ?')
-    .get(emailHash)
-}
-
-function insertTrialActivation({ id, emailHash, startedAt, trialExpiresAt }) {
-  getDb().prepare(
-    `INSERT INTO trial_activations (id, email_hash, started_at, trial_expires_at)
-     VALUES (?, ?, ?, ?)`,
-  ).run(id, emailHash, startedAt, trialExpiresAt)
-}
-
-// --- 试用邮件验证码（6 位，非 Pro 激活码）---
-
-function deleteVerificationCodesForEmail(emailHash) {
-  getDb().prepare('DELETE FROM license_email_verification_codes WHERE email_hash = ?').run(emailHash)
-}
-
-function insertVerificationCode({ emailHash, codeHash, expiresAt }) {
-  deleteVerificationCodesForEmail(emailHash)
-  getDb().prepare(
-    `INSERT INTO license_email_verification_codes (email_hash, code_hash, expires_at, created_at)
-     VALUES (?, ?, ?, ?)`,
-  ).run(emailHash, codeHash, expiresAt, nowMs())
-}
-
-function getLatestVerificationCode(emailHash) {
-  return getDb()
-    .prepare(
-      `SELECT email_hash, code_hash, expires_at, created_at
-       FROM license_email_verification_codes
-       WHERE email_hash = ?
-       ORDER BY created_at DESC
-       LIMIT 1`,
-    )
-    .get(emailHash)
-}
-
-function getVerificationCodeCreatedWithin(emailHash, sinceMs) {
-  return getDb()
-    .prepare(
-      `SELECT created_at FROM license_email_verification_codes
-       WHERE email_hash = ? AND created_at >= ?
-       ORDER BY created_at DESC
-       LIMIT 1`,
-    )
-    .get(emailHash, sinceMs)
-}
-
-// --- 授权主记录（edition / 设备列表；与签名 license 的 license_id 对应）---
-
-function upsertLicenseRecord({ licenseId, emailHash, edition, deviceIds }) {
-  const now = nowMs()
-  const deviceIdsJson = JSON.stringify(deviceIds)
-  const existing = getDb().prepare('SELECT license_id FROM license_records WHERE license_id = ?').get(licenseId)
-  if (existing) {
-    getDb().prepare(
-      `UPDATE license_records
-       SET email_hash = ?, edition = ?, device_ids_json = ?, updated_at = ?
-       WHERE license_id = ?`,
-    ).run(emailHash, edition, deviceIdsJson, now, licenseId)
-    return
-  }
-  getDb().prepare(
-    `INSERT INTO license_records (license_id, email_hash, edition, device_ids_json, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-  ).run(licenseId, emailHash, edition, deviceIdsJson, now, now)
-}
-
-function getLicenseRecord(licenseId) {
-  const row = getDb()
-    .prepare(
-      `SELECT license_id, email_hash, edition, device_ids_json, created_at, updated_at, revoked_at
-       FROM license_records WHERE license_id = ?`,
-    )
-    .get(licenseId)
+function parseDeviceIdsJson(row) {
   if (!row) return null
   return {
     ...row,
@@ -91,21 +12,90 @@ function getLicenseRecord(licenseId) {
   }
 }
 
-// --- 激活码池：unused → fulfilled → redeemed ---
+const PRO_CODE_COLUMNS =
+  'code, status, fulfilled_email, fulfilled_at, redeemed_at, license_id, created_at'
+
+// --- 试用 ---
+
+function getTrialActivationByDeviceId(deviceId) {
+  return getDb()
+    .prepare('SELECT id, device_id, started_at, trial_expires_at FROM trial_activations WHERE device_id = ?')
+    .get(deviceId)
+}
+
+function getTrialActivationById(licenseId) {
+  return getDb()
+    .prepare('SELECT id, device_id, started_at, trial_expires_at FROM trial_activations WHERE id = ?')
+    .get(licenseId)
+}
+
+function insertTrialActivation({ id, deviceId, startedAt, trialExpiresAt }) {
+  getDb().prepare(
+    `INSERT INTO trial_activations (id, device_id, started_at, trial_expires_at)
+     VALUES (?, ?, ?, ?)`,
+  ).run(id, deviceId, startedAt, trialExpiresAt)
+}
+
+function listTrialActivationsForAdmin() {
+  return getDb()
+    .prepare(
+      `SELECT id, device_id, started_at, trial_expires_at
+       FROM trial_activations
+       ORDER BY started_at DESC`,
+    )
+    .all()
+}
+
+// --- 授权主记录 ---
+
+function upsertLicenseRecord({ licenseId, edition, deviceIds, deviceLimitOverride = null }) {
+  const now = nowMs()
+  const deviceIdsJson = JSON.stringify(deviceIds)
+  const existing = getDb().prepare('SELECT license_id FROM license_records WHERE license_id = ?').get(licenseId)
+  if (existing) {
+    getDb().prepare(
+      `UPDATE license_records
+       SET edition = ?, device_ids_json = ?, device_limit_override = ?, updated_at = ?
+       WHERE license_id = ?`,
+    ).run(edition, deviceIdsJson, deviceLimitOverride, now, licenseId)
+    return
+  }
+  getDb().prepare(
+    `INSERT INTO license_records (license_id, edition, device_ids_json, device_limit_override, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(licenseId, edition, deviceIdsJson, deviceLimitOverride, now, now)
+}
+
+function getLicenseRecord(licenseId) {
+  const row = getDb()
+    .prepare(
+      `SELECT license_id, edition, device_ids_json, device_limit_override, created_at, updated_at, revoked_at
+       FROM license_records WHERE license_id = ?`,
+    )
+    .get(licenseId)
+  return parseDeviceIdsJson(row)
+}
+
+function setLicenseRecordDeviceLimitOverride({ licenseId, deviceLimitOverride }) {
+  getDb().prepare(
+    `UPDATE license_records
+     SET device_limit_override = ?, updated_at = ?
+     WHERE license_id = ?`,
+  ).run(deviceLimitOverride, nowMs(), licenseId)
+}
+
+// --- 激活码池 ---
 
 function getProCode(code) {
   return getDb()
-    .prepare(
-      `SELECT code, email_hash, status, fulfilled_at, redeemed_at, license_id, created_at
-       FROM pro_activation_codes WHERE code = ?`,
-    )
+    .prepare(`SELECT ${PRO_CODE_COLUMNS} FROM pro_activation_codes WHERE code = ?`)
     .get(code)
 }
 
 function insertProCodes(codes) {
   const stmt = getDb().prepare(
-    `INSERT INTO pro_activation_codes (code, email_hash, status, fulfilled_at, redeemed_at, license_id, created_at)
-     VALUES (?, NULL, 'unused', NULL, NULL, NULL, ?)`,
+    `INSERT INTO pro_activation_codes (code, status, fulfilled_email, fulfilled_at, redeemed_at, license_id, created_at)
+     VALUES (?, 'unused', NULL, NULL, NULL, NULL, ?)`,
   )
   const createdAt = nowMs()
   const insertMany = getDb().transaction((items) => {
@@ -129,12 +119,12 @@ function takeUnusedProCode() {
     .get()
 }
 
-function markProCodeFulfilled({ code, emailHash }) {
+function markProCodeFulfilled({ code, fulfilledEmail, licenseId }) {
   getDb().prepare(
     `UPDATE pro_activation_codes
-     SET email_hash = ?, status = 'fulfilled', fulfilled_at = ?
+     SET fulfilled_email = ?, status = 'fulfilled', fulfilled_at = ?, license_id = ?
      WHERE code = ? AND status = 'unused'`,
-  ).run(emailHash, nowMs(), code)
+  ).run(fulfilledEmail, nowMs(), licenseId, code)
 }
 
 function markProCodeRedeemed({ code, licenseId }) {
@@ -177,105 +167,37 @@ function restoreLicenseRecord(licenseId) {
   ).run(nowMs(), licenseId)
 }
 
-const PRO_CODE_COLUMNS =
-  'code, email_hash, status, fulfilled_at, redeemed_at, license_id'
-
-function getProCodeForEmail(emailHash, { statusSql, orderBy }) {
+function getPendingFulfilledProCodeForEmail(email) {
   return getDb()
     .prepare(
       `SELECT ${PRO_CODE_COLUMNS}
        FROM pro_activation_codes
-       WHERE email_hash = ? AND ${statusSql}
-       ORDER BY ${orderBy}
+       WHERE fulfilled_email = ? AND status = 'fulfilled'
+       ORDER BY fulfilled_at DESC
        LIMIT 1`,
     )
-    .get(emailHash)
+    .get(email)
 }
 
-function getRedeemedProCodeForEmail(emailHash) {
-  return getProCodeForEmail(emailHash, { statusSql: "status = 'redeemed'", orderBy: 'redeemed_at DESC' })
-}
-
-function getRevokedProCodeForEmail(emailHash) {
-  return getProCodeForEmail(emailHash, { statusSql: "status = 'revoked'", orderBy: 'redeemed_at DESC' })
-}
-
-function getLatestProCodeForEmail(emailHash) {
-  return getProCodeForEmail(emailHash, {
-    statusSql: "status IN ('fulfilled', 'redeemed', 'revoked')",
-    orderBy: 'fulfilled_at DESC'
-  })
-}
-
-function getFulfilledProCodeForEmail(emailHash) {
-  return getProCodeForEmail(emailHash, {
-    statusSql: "status IN ('fulfilled', 'redeemed')",
-    orderBy: 'fulfilled_at DESC'
-  })
-}
-
-function getActiveLicenseRecordForEmail(emailHash) {
+function listProCodesForAdmin() {
   return getDb()
     .prepare(
-      `SELECT license_id, email_hash, edition, device_ids_json, created_at, updated_at
-       FROM license_records
-       WHERE email_hash = ?
-       ORDER BY updated_at DESC
-       LIMIT 1`,
-    )
-    .get(emailHash)
-}
-
-function getLicenseContactByEmailHash(emailHash) {
-  return getDb()
-    .prepare(
-      `SELECT email, email_hash, updated_at, device_limit_override
-       FROM license_contacts WHERE email_hash = ?`,
-    )
-    .get(emailHash)
-}
-
-function upsertLicenseContact({ email, emailHash }) {
-  getDb().prepare(
-    `INSERT INTO license_contacts (email, email_hash, updated_at)
-     VALUES (?, ?, ?)
-     ON CONFLICT(email) DO UPDATE SET
-       email_hash = excluded.email_hash,
-       updated_at = excluded.updated_at`,
-  ).run(email, emailHash, nowMs())
-}
-
-/** deviceLimitOverride: null=全局默认，0=不限，正整数=自定义上限 */
-function setLicenseContactDeviceLimit({ email, emailHash, deviceLimitOverride }) {
-  getDb().prepare(
-    `INSERT INTO license_contacts (email, email_hash, updated_at, device_limit_override)
-     VALUES (?, ?, ?, ?)
-     ON CONFLICT(email) DO UPDATE SET
-       device_limit_override = excluded.device_limit_override,
-       updated_at = excluded.updated_at`,
-  ).run(email, emailHash, nowMs(), deviceLimitOverride)
-}
-
-/** 运维页：全部已知邮箱 */
-function listAllLicenseContacts() {
-  return getDb()
-    .prepare(
-      `SELECT email, email_hash, device_limit_override
-       FROM license_contacts
-       ORDER BY updated_at DESC`,
+      `SELECT ${PRO_CODE_COLUMNS}
+       FROM pro_activation_codes
+       WHERE status IN ('fulfilled', 'redeemed', 'revoked')
+       ORDER BY COALESCE(redeemed_at, fulfilled_at, created_at) DESC`,
     )
     .all()
 }
 
 module.exports = {
-  getTrialActivationByEmailHash,
+  getTrialActivationByDeviceId,
+  getTrialActivationById,
   insertTrialActivation,
-  deleteVerificationCodesForEmail,
-  insertVerificationCode,
-  getLatestVerificationCode,
-  getVerificationCodeCreatedWithin,
+  listTrialActivationsForAdmin,
   upsertLicenseRecord,
   getLicenseRecord,
+  setLicenseRecordDeviceLimitOverride,
   getProCode,
   insertProCodes,
   countUnusedProCodes,
@@ -286,13 +208,6 @@ module.exports = {
   markProCodeRestored,
   revokeLicenseRecord,
   restoreLicenseRecord,
-  getRedeemedProCodeForEmail,
-  getRevokedProCodeForEmail,
-  getLatestProCodeForEmail,
-  getFulfilledProCodeForEmail,
-  getActiveLicenseRecordForEmail,
-  upsertLicenseContact,
-  getLicenseContactByEmailHash,
-  setLicenseContactDeviceLimit,
-  listAllLicenseContacts
+  getPendingFulfilledProCodeForEmail,
+  listProCodesForAdmin
 }

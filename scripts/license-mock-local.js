@@ -14,7 +14,7 @@ const fs = require('fs')
 const os = require('os')
 const path = require('path')
 const { signLicensePayload, buildTrialPayload, buildProPayload } = require('../src/utils/licenseSigning')
-const { newLicenseId, hashEmail, addDaysMs, assertDeviceId } = require('../src/utils/licenseCrypto')
+const { newLicenseId, addDaysMs, assertDeviceId } = require('../src/utils/licenseCrypto')
 const { TRIAL_DAYS } = require('../src/config/licenseConfig')
 
 const APP_ELECTRON = path.join(__dirname, '../../xiaoxiao-album-app/electron')
@@ -22,7 +22,6 @@ const { getDeviceId } = require(path.join(APP_ELECTRON, 'licenseDevice.cjs'))
 const { resolveEdition } = require(path.join(APP_ELECTRON, 'licenseVerifier.cjs'))
 
 const USER_DATA_BASENAME = 'xiaoxiao-photos-app'
-const MOCK_EMAIL = 'dev-mock@xiaoxiao.local'
 const EDITIONS = new Set(['trial', 'free', 'pro'])
 const FREE_TRIAL_EXPIRES_MS = Date.parse('2020-01-01T00:00:00.000Z')
 
@@ -64,15 +63,14 @@ const { readLicenseFile } = require(path.join(APP_ELECTRON, 'licenseStore.cjs'))
 
 function buildPayload(edition, { deviceId, existing }) {
   const licenseId = existing?.payload?.license_id || newLicenseId()
-  const emailHash = existing?.payload?.email_hash || hashEmail(MOCK_EMAIL)
   const deviceIds = [...new Set([...(existing?.payload?.device_ids || []), deviceId])]
 
   if (edition === 'pro') {
-    return buildProPayload({ emailHash, deviceIds, licenseId })
+    return buildProPayload({ deviceIds, licenseId })
   }
 
   const trialExpiresAtMs = edition === 'free' ? FREE_TRIAL_EXPIRES_MS : addDaysMs(TRIAL_DAYS)
-  return buildTrialPayload({ emailHash, deviceIds, trialExpiresAtMs, licenseId })
+  return buildTrialPayload({ deviceIds, trialExpiresAtMs, licenseId })
 }
 
 function printUsage() {

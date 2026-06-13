@@ -3,7 +3,7 @@
 为 **product-releases-app** 提供：
 
 - 访问统计（页面访问、下载点击）
-- **云端许可证 API**（试用验证码、Pro 激活码、admin fulfill）
+- **云端许可证 API**（静默试用、Pro 激活码、admin fulfill）
 
 桌面端通过独立子域名调用许可证接口（方案 B），**不**走本机 `xiaoxiao-album-api`。
 
@@ -22,12 +22,13 @@ npm run dev
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/license/config` | 公开；`{ trialDays, deviceLimit }`（来自 `LICENSE_TRIAL_DAYS` 等 env） |
-| POST | `/api/license/trial/send-code` | body `{ email }` |
-| POST | `/api/license/trial/activate` | body `{ email, code, device_id }` |
-| POST | `/api/license/pro/redeem` | body `{ email, activation_code, device_id }` |
+| POST | `/api/license/trial/start` | body `{ device_id }` → 静默开启/恢复试用 |
+| POST | `/api/license/pro/redeem` | body `{ activation_code, device_id }` |
 | POST | `/api/license/admin/session` | body `{ username, password }` → jwtToken（`LICENSE_ADMIN_*`） |
 | GET | `/api/license/admin/overview` | **Bearer** 运维页一览 |
-| PATCH | `/api/license/admin/recipients/device-limit` | **Bearer** body `{ email, device_limit_override }`（null=默认，0=不限，N=自定义） |
+| PATCH | `/api/license/admin/codes/device-limit` | **Bearer** body `{ activation_code, device_limit_override }`（null=默认，0=不限，N=自定义） |
+| POST | `/api/license/admin/revoke-pro` | **Bearer** body `{ activation_code }` |
+| POST | `/api/license/admin/restore-pro` | **Bearer** body `{ activation_code }` |
 | POST | `/api/license/admin/codes` | **Bearer** 批量生成激活码 |
 | POST | `/api/license/admin/fulfill` | **Bearer** 确认到账发码邮件 |
 
@@ -38,7 +39,7 @@ npm run dev
 VITE_LICENSE_API_BASE=https://license.bingbingcloud.com
 ```
 
-请求示例：`POST https://license.bingbingcloud.com/api/license/trial/send-code`
+请求示例：`POST https://license.bingbingcloud.com/api/license/trial/start`
 
 ### 初始化密钥与激活码
 

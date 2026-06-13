@@ -15,11 +15,10 @@ function loadPrivateKey() {
   return crypto.createPrivateKey(pem)
 }
 
-function buildTrialPayload({ emailHash, deviceIds, trialExpiresAtMs, licenseId }) {
+function buildTrialPayload({ deviceIds, trialExpiresAtMs, licenseId }) {
   return {
-    v: 1,
+    v: 2,
     edition: 'trial',
-    email_hash: emailHash,
     trial_expires_at: msToIso(trialExpiresAtMs),
     pro_activated_at: null,
     device_ids: deviceIds,
@@ -28,12 +27,11 @@ function buildTrialPayload({ emailHash, deviceIds, trialExpiresAtMs, licenseId }
   }
 }
 
-function buildProPayload({ emailHash, deviceIds, licenseId }) {
+function buildProPayload({ deviceIds, licenseId }) {
   const activatedAtMs = nowMs()
   return {
-    v: 1,
+    v: 2,
     edition: 'pro',
-    email_hash: emailHash,
     trial_expires_at: null,
     pro_activated_at: msToIso(activatedAtMs),
     device_ids: deviceIds,

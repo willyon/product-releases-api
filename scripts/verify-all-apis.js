@@ -5,24 +5,14 @@
  * 需 API 已启动（默认 http://127.0.0.1:3090）
  */
 require('dotenv').config()
+const crypto = require('crypto')
 
 const { getDb } = require('../src/db/getDb')
-const {
-  hashEmail,
-  hashVerificationCode,
-  normalizeEmail,
-  newLicenseId,
-  nowMs,
-  addDaysMs
-} = require('../src/utils/licenseCrypto')
-const licenseModel = require('../src/models/licenseModel')
 
 const BASE = `http://${process.env.HOST || '127.0.0.1'}:${process.env.PORT || 3091}`
 const PRODUCT_KEY = 'xiaoxiao-photos'
-const TEST_DEVICE_ID = 'a'.repeat(64)
-const TRIAL_EMAIL = `verify-test-${Date.now()}@example.com`
+const TEST_DEVICE_ID = crypto.createHash('sha256').update(`verify-${Date.now()}`).digest('hex')
 const PRO_EMAIL = `pro-test-${Date.now()}@example.com`
-const TRIAL_CODE = '654321'
 
 const results = []
 
@@ -46,16 +36,6 @@ async function request(method, path, { body, headers = {} } = {}) {
     json = null
   }
   return { status: res.status, json }
-}
-
-function seedTrialVerificationCode(email, code) {
-  const emailHash = hashEmail(normalizeEmail(email))
-  const expiresAt = Date.now() + 10 * 60 * 1000
-  getDb().prepare('DELETE FROM license_email_verification_codes WHERE email_hash = ?').run(emailHash)
-  getDb().prepare(
-    `INSERT INTO license_email_verification_codes (email_hash, code_hash, expires_at, created_at)
-     VALUES (?, ?, ?, ?)`,
-  ).run(emailHash, hashVerificationCode(code), expiresAt, Date.now())
 }
 
 async function main() {
@@ -210,15 +190,6 @@ async function main() {
 
       if (generatedCode) {
         try {
-          const proEmailNorm = normalizeEmail(PRO_EMAIL)
-          const proEmailHash = hashEmail(proEmailNorm)
-          licenseModel.insertTrialActivation({
-            id: newLicenseId(),
-            emailHash: proEmailHash,
-            startedAt: nowMs(),
-            trialExpiresAt: addDaysMs(14)
-          })
-
           const r = await request('POST', '/api/license/admin/fulfill', {
             body: { email: PRO_EMAIL },
             headers: auth
@@ -237,9 +208,9 @@ async function main() {
 
       try {
         const r = await request('GET', '/api/license/admin/overview', { headers: auth })
-        const recipients = r.json?.data?.recipients
-        const proRow = Array.isArray(recipients)
-          ? recipients.find((row) => row.email === PRO_EMAIL)
+        const entries = r.json?.data?.entries
+        const proRow = Array.isArray(entries)
+          ? entries.find((row) => row.kind === 'pro' && row.fulfilled_email === PRO_EMAIL)
           : null
         if (
           r.status === 200 &&
@@ -256,22 +227,24 @@ async function main() {
           fail('GET /api/license/admin/overview', `HTTP ${r.status} 或缺少 device_* 字段`)
         }
 
-        try {
-          const patch = await request('PATCH', '/api/license/admin/recipients/device-limit', {
-            body: { email: PRO_EMAIL, device_limit_override: 0 },
-            headers: auth
-          })
-          if (
-            patch.status === 200 &&
-            patch.json?.data?.device_limit_override === 0 &&
-            patch.json?.data?.device_limit === null
-          ) {
-            pass('PATCH /api/license/admin/recipients/device-limit', '设为不限')
-          } else {
-            fail('PATCH /api/license/admin/recipients/device-limit', `HTTP ${patch.status}`)
+        if (proRow?.activation_code) {
+          try {
+            const patch = await request('PATCH', '/api/license/admin/codes/device-limit', {
+              body: { activation_code: proRow.activation_code, device_limit_override: 0 },
+              headers: auth
+            })
+            if (
+              patch.status === 200 &&
+              patch.json?.data?.device_limit_override === 0 &&
+              patch.json?.data?.device_limit === null
+            ) {
+              pass('PATCH /api/license/admin/codes/device-limit', '设为不限')
+            } else {
+              fail('PATCH /api/license/admin/codes/device-limit', `HTTP ${patch.status}`)
+            }
+          } catch (e) {
+            fail('PATCH /api/license/admin/codes/device-limit', e.message)
           }
-        } catch (e) {
-          fail('PATCH /api/license/admin/recipients/device-limit', e.message)
         }
       } catch (e) {
         fail('GET /api/license/admin/overview', e.message)
@@ -279,38 +252,26 @@ async function main() {
     }
   }
 
-  // --- License trial send-code (真实 SMTP) ---
-  const emailConfigured = process.env.EMAIL_HOST && process.env.EMAIL_USER && process.env.EMAIL_PASS
-  const sendCodeEmail = `smtp-test-${Date.now()}@example.com`
-  if (!emailConfigured) {
-    fail('POST /api/license/trial/send-code', 'EMAIL_* 未配置')
-  } else {
-    try {
-      const r = await request('POST', '/api/license/trial/send-code', { body: { email: sendCodeEmail } })
-      if (r.status === 200) pass('POST /api/license/trial/send-code', r.json?.message || '200')
-      else if (r.status === 502 || r.status === 503) {
-        fail('POST /api/license/trial/send-code', `SMTP/邮件配置: HTTP ${r.status}`)
-      }
-      else fail('POST /api/license/trial/send-code', `HTTP ${r.status} ${r.json?.message || ''}`)
-    } catch (e) {
-      fail('POST /api/license/trial/send-code', e.message)
-    }
-  }
-
-  // --- License trial activate (DB 注入验证码，不依赖邮件) ---
+  // --- License trial/start ---
   if (!process.env.LICENSE_PRIVATE_KEY_BASE64) {
-    fail('POST /api/license/trial/activate', 'LICENSE_PRIVATE_KEY_BASE64 未配置')
+    fail('POST /api/license/trial/start', 'LICENSE_PRIVATE_KEY_BASE64 未配置')
   } else {
-    seedTrialVerificationCode(TRIAL_EMAIL, TRIAL_CODE)
     try {
-      const r = await request('POST', '/api/license/trial/activate', {
-        body: { email: TRIAL_EMAIL, code: TRIAL_CODE, device_id: TEST_DEVICE_ID }
+      const r = await request('POST', '/api/license/trial/start', {
+        body: { device_id: TEST_DEVICE_ID }
       })
       if (r.status === 200 && r.json?.data?.license?.signature) {
-        pass('POST /api/license/trial/activate', `edition=${r.json.data.edition}`)
-      } else fail('POST /api/license/trial/activate', `HTTP ${r.status} ${r.json?.message || ''}`)
+        pass('POST /api/license/trial/start', `edition=${r.json.data.edition}`)
+      } else fail('POST /api/license/trial/start', `HTTP ${r.status} ${r.json?.message || ''}`)
+
+      const r2 = await request('POST', '/api/license/trial/start', {
+        body: { device_id: TEST_DEVICE_ID }
+      })
+      if (r2.status === 200 && r2.json?.data?.license?.signature) {
+        pass('POST /api/license/trial/start (幂等)', `edition=${r2.json.data.edition}`)
+      } else fail('POST /api/license/trial/start (幂等)', `HTTP ${r2.status}`)
     } catch (e) {
-      fail('POST /api/license/trial/activate', e.message)
+      fail('POST /api/license/trial/start', e.message)
     }
   }
 
@@ -319,31 +280,32 @@ async function main() {
     fail('POST /api/license/pro/redeem', '跳过：缺私钥')
   } else {
     // 确保 PRO_EMAIL 有 fulfilled 码（fulfill 可能因 SMTP 失败但码已绑定）
-    const emailHash = hashEmail(normalizeEmail(PRO_EMAIL))
-    const row = getDb()
-      .prepare("SELECT code FROM pro_activation_codes WHERE email_hash = ? AND status IN ('fulfilled','redeemed') LIMIT 1")
-      .get(emailHash)
+    let codeRow = getDb()
+      .prepare("SELECT code, license_id FROM pro_activation_codes WHERE fulfilled_email = ? AND status IN ('fulfilled','redeemed') LIMIT 1")
+      .get(PRO_EMAIL)
 
-    if (!row?.code) {
+    if (!codeRow?.code) {
       const unused = getDb().prepare("SELECT code FROM pro_activation_codes WHERE status = 'unused' LIMIT 1").get()
       if (unused?.code) {
+        const licenseId = `lic_${Date.now()}`
         getDb().prepare(
-          `UPDATE pro_activation_codes SET email_hash = ?, status = 'fulfilled', fulfilled_at = ? WHERE code = ?`,
-        ).run(emailHash, Date.now(), unused.code)
+          `UPDATE pro_activation_codes SET fulfilled_email = ?, status = 'fulfilled', fulfilled_at = ?, license_id = ? WHERE code = ?`,
+        ).run(PRO_EMAIL, Date.now(), licenseId, unused.code)
+        getDb().prepare(
+          `INSERT INTO license_records (license_id, edition, device_ids_json, device_limit_override, created_at, updated_at)
+           VALUES (?, 'pro', '[]', NULL, ?, ?)`,
+        ).run(licenseId, Date.now(), Date.now())
+        codeRow = { code: unused.code, license_id: licenseId }
         pass('POST /api/license/pro/redeem (准备)', `手动绑定码 ${unused.code}`)
       } else {
         fail('POST /api/license/pro/redeem', '无可用激活码，请先 admin/codes')
       }
     }
 
-    const codeRow = getDb()
-      .prepare("SELECT code FROM pro_activation_codes WHERE email_hash = ? AND status = 'fulfilled' LIMIT 1")
-      .get(emailHash)
-
     if (codeRow?.code) {
       try {
         const r = await request('POST', '/api/license/pro/redeem', {
-          body: { email: PRO_EMAIL, activation_code: codeRow.code, device_id: TEST_DEVICE_ID }
+          body: { activation_code: codeRow.code, device_id: TEST_DEVICE_ID }
         })
         if (r.status === 200 && r.json?.data?.license?.signature) {
           pass('POST /api/license/pro/redeem', `edition=${r.json.data.edition}`)

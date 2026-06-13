@@ -12,7 +12,7 @@ async function main() {
     console.error('Usage: node scripts/license-fulfill.js <email>')
     process.exit(1)
   }
-  console.log(JSON.stringify(await licenseService.fulfillOrder({ email, requireTrialCode: false }), null, 2))
+  console.log(JSON.stringify(await licenseService.fulfillOrder({ email }), null, 2))
 }
 
 main().catch((error) => {

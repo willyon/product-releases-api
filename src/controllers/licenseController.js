@@ -7,22 +7,13 @@ const { TRIAL_DAYS, DEVICE_LIMIT } = require('../config/licenseConfig')
 const CustomError = require('../errors/customError')
 const { SUCCESS_CODES: SC, ERROR_CODES: EC } = require('../constants/messageCodes')
 
-async function sendTrialCode(req, res) {
-  await licenseService.sendTrialCode({ email: req.body?.email })
-  res.sendResponse({ messageCode: SC.TRIAL_CODE_SENT })
-}
-
-function activateTrial(req, res) {
-  const { code, device_id: deviceId } = req.body || {}
-  if (!code || !deviceId) {
+function startTrial(req, res) {
+  const { device_id: deviceId } = req.body || {}
+  if (!deviceId) {
     throw new CustomError({ httpStatus: 400, messageCode: EC.MISSING_REQUIRED_FIELDS })
   }
-  const data = licenseService.activateTrial({
-    email: req.body?.email,
-    code,
-    deviceId
-  })
-  res.sendResponse({ messageCode: SC.TRIAL_ACTIVATED, data })
+  const data = licenseService.startTrial({ deviceId })
+  res.sendResponse({ messageCode: SC.TRIAL_STARTED, data })
 }
 
 function redeemPro(req, res) {
@@ -30,11 +21,7 @@ function redeemPro(req, res) {
   if (!activationCode || !deviceId) {
     throw new CustomError({ httpStatus: 400, messageCode: EC.MISSING_REQUIRED_FIELDS })
   }
-  const data = licenseService.redeemPro({
-    email: req.body?.email,
-    activationCode,
-    deviceId
-  })
+  const data = licenseService.redeemPro({ activationCode, deviceId })
   res.sendResponse({ messageCode: SC.PRO_REDEEMED, data })
 }
 
@@ -65,21 +52,33 @@ function getAdminOverview(_req, res) {
   res.sendResponse({ data: licenseService.getAdminOverview() })
 }
 
-function setRecipientDeviceLimit(req, res) {
-  const data = licenseService.setRecipientDeviceLimit({
-    email: req.body?.email,
+function setLicenseDeviceLimit(req, res) {
+  const activationCode = req.body?.activation_code
+  if (!activationCode) {
+    throw new CustomError({ httpStatus: 400, messageCode: EC.MISSING_REQUIRED_FIELDS })
+  }
+  const data = licenseService.setLicenseDeviceLimit({
+    activationCode,
     deviceLimitOverride: req.body?.device_limit_override ?? null
   })
   res.sendResponse({ messageCode: SC.DEVICE_LIMIT_UPDATED, data })
 }
 
 function revokeProLicense(req, res) {
-  const data = licenseService.revokeProLicense({ email: req.body?.email })
+  const activationCode = req.body?.activation_code
+  if (!activationCode) {
+    throw new CustomError({ httpStatus: 400, messageCode: EC.MISSING_REQUIRED_FIELDS })
+  }
+  const data = licenseService.revokeProLicense({ activationCode })
   res.sendResponse({ messageCode: SC.PRO_REVOKED, data })
 }
 
 function restoreProLicense(req, res) {
-  const data = licenseService.restoreProLicense({ email: req.body?.email })
+  const activationCode = req.body?.activation_code
+  if (!activationCode) {
+    throw new CustomError({ httpStatus: 400, messageCode: EC.MISSING_REQUIRED_FIELDS })
+  }
+  const data = licenseService.restoreProLicense({ activationCode })
   res.sendResponse({ messageCode: SC.PRO_RESTORED, data })
 }
 
@@ -89,15 +88,14 @@ function createLicenseAdminSession(req, res) {
 }
 
 module.exports = {
-  sendTrialCode,
-  activateTrial,
+  startTrial,
   redeemPro,
   refreshLicense,
   generateProCodes,
   fulfillOrder,
   getPublicConfig,
   getAdminOverview,
-  setRecipientDeviceLimit,
+  setLicenseDeviceLimit,
   revokeProLicense,
   restoreProLicense,
   createLicenseAdminSession
