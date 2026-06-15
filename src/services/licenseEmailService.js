@@ -60,7 +60,7 @@ async function sendProActivationEmail({ email, activationCode }) {
       '1. 打开笑笑相册',
       '2. 进入 版本与激活 → 输入 Pro 激活码',
       '',
-      `付款确认后不予退款。Pro 授权可绑定 ${DEVICE_LIMIT} 台设备。`,
+      `Pro 授权可绑定 ${DEVICE_LIMIT} 台设备。`,
       '',
       '此邮件由系统自动发送，请勿直接回复。'
     ].join('\n'),
@@ -72,7 +72,7 @@ async function sendProActivationEmail({ email, activationCode }) {
       <li>打开笑笑相册</li>
       <li>进入 <strong>版本与激活</strong> → 输入 Pro 激活码</li>
     </ol>
-    <p style="color:#666;font-size:13px;">付款确认后不予退款。Pro 授权可绑定 ${DEVICE_LIMIT} 台设备。</p>
+    <p style="color:#666;font-size:13px;">Pro 授权可绑定 ${DEVICE_LIMIT} 台设备。</p>
     <p style="color:#666;font-size:13px;">此邮件由系统自动发送，请勿直接回复。</p>
   `
   })
